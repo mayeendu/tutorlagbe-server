@@ -4,7 +4,7 @@
   "description": "",
   "main": "dist/start.js",
   "scripts": {
-    "test": "node --test test/api.test.mjs",
+    "test": "node --test",
     "dev": "node --watch api/start.ts",
     "build": "tsc -p tsconfig.api.json",
     "typecheck": "tsc -p tsconfig.api.json --noEmit",
@@ -13,10 +13,13 @@
   "keywords": [],
   "type": "module",
   "dependencies": {
+    "@better-auth/mongo-adapter": "1.7.27",
+    "better-auth": "1.7.27",
     "cors": "^2.8.6",
     "dotenv": "^18.0.10",
     "express": "^5.3.0",
-    "mongodb": "^7.9.1"
+    "mongodb": "^7.9.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

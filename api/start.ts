@@ -1,7 +1,10 @@
 import 'dotenv/config';
+import { mongodbAdapter } from '@better-auth/mongo-adapter';
 import { MongoClient } from 'mongodb';
 
 import { createApi } from './app.ts';
+import { createAuth } from './auth.ts';
+import type { Tuition } from './tuitions.ts';
 
 function start() {
     const port = Number(process.env.PORT ?? 8000);
@@ -23,21 +26,58 @@ function start() {
         allowedOrigins.add(origin);
     }
 
-    const mongoUri = process.env.MONGODB_URI?.trim();
-    let mongo: MongoClient | undefined;
-    if (mongoUri) {
+    const clients = new Map<string, MongoClient>();
+    function getClient(uri: string, setting: string) {
+        const existing = clients.get(uri);
+        if (existing) return existing;
         try {
-            mongo = new MongoClient(mongoUri, { serverSelectionTimeoutMS: 3000, timeoutMS: 3000 });
+            const client = new MongoClient(uri, {
+                serverSelectionTimeoutMS: 3000,
+                connectTimeoutMS: 3000,
+                socketTimeoutMS: 3000,
+            });
+            clients.set(uri, client);
+            return client;
         } catch {
-            throw new Error('MONGODB_URI is invalid.');
+            throw new Error(`${setting} is invalid.`);
         }
     }
 
+    const mongoUri = process.env.MONGODB_URI?.trim();
+    if (mongoUri) getClient(mongoUri, 'MONGODB_URI');
+
+    const secret = process.env.BETTER_AUTH_SECRET;
+    const authUri = process.env.BETTER_AUTH_DB_URI?.trim();
+    let auth: ReturnType<typeof createAuth> | undefined;
+    if (secret || authUri || process.env.BETTER_AUTH_URL) {
+        const url = URL.parse(process.env.BETTER_AUTH_URL ?? '');
+        const validUrl = url && ['http:', 'https:'].includes(url.protocol) &&
+            url.pathname === '/' && !url.search && !url.hash && !url.username && !url.password;
+        const databaseUri = authUri || mongoUri;
+        if (!secret || secret.trim().length < 32 || !databaseUri || !validUrl) {
+            throw new Error('Configure BETTER_AUTH_SECRET (at least 32 characters), BETTER_AUTH_URL (the public origin), and BETTER_AUTH_DB_URI or MONGODB_URI.');
+        }
+
+        const client = getClient(databaseUri, authUri ? 'BETTER_AUTH_DB_URI' : 'MONGODB_URI');
+        const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
+        const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+        auth = createAuth({
+            database: mongodbAdapter(client.db('tutorlagbe_db'), { client }),
+            baseURL: url.origin,
+            secret,
+            google: clientId && clientSecret ? { clientId, clientSecret } : undefined,
+        });
+    }
+
+    const tuitionUri = mongoUri || authUri;
     const app = createApi({
         allowedOrigins,
+        auth,
+        tuitions: tuitionUri ? clients.get(tuitionUri)
+            ?.db('tutorlagbe_db').collection<Tuition>('tuitions') : undefined,
         checkDatabase: async () => {
-            if (!mongo) return false;
-            await mongo.db('admin').command({ ping: 1 });
+            if (!clients.size) return false;
+            await Promise.all([...clients.values()].map((client) => client.db('admin').command({ ping: 1 })));
             return true;
         },
     });
@@ -50,7 +90,7 @@ function start() {
 
     function shutdown() {
         server.close(() => {
-            void mongo?.close().catch(() => {
+            void Promise.all([...clients.values()].map((client) => client.close())).catch(() => {
                 console.error('Could not close the database connection.');
                 process.exitCode = 1;
             });

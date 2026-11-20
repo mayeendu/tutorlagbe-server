@@ -1,11 +1,19 @@
 import express from 'express';
+import { toNodeHandler } from 'better-auth/node';
+import type { Collection } from 'mongodb';
+
+import { verifyToken } from './access.ts';
+import type { TutorAuth } from './auth.ts';
+import { tuitionRoutes, type Tuition } from './tuitions.ts';
 
 interface ApiOptions {
     allowedOrigins: ReadonlySet<string>;
     checkDatabase: () => Promise<boolean>;
+    auth?: TutorAuth;
+    tuitions?: Collection<Tuition>;
 }
 
-export function createApi({ allowedOrigins, checkDatabase }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, auth, tuitions }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -44,6 +52,30 @@ export function createApi({ allowedOrigins, checkDatabase }: ApiOptions) {
         const ready = await checkDatabase().catch(() => false);
         response.status(ready ? 200 : 503).json({ ready });
     });
+
+    if (auth) {
+        app.get('/api/auth/identity', verifyToken(auth), (_request, response) => {
+            response.json(response.locals.identity);
+        });
+        const handleAuth = toNodeHandler(auth);
+        app.all('/api/auth/{*path}', async (request, response) => {
+            response.set('Cache-Control', 'no-store');
+            await handleAuth(request, response);
+        });
+    } else {
+        app.all('/api/auth/{*path}', (_request, response) => {
+            response.set('Cache-Control', 'no-store').status(503)
+                .json({ message: 'Authentication is temporarily unavailable' });
+        });
+    }
+
+    if (tuitions) {
+        app.use('/api/tuitions', tuitionRoutes(tuitions, auth));
+    } else {
+        app.use('/api/tuitions', (_request, response) => {
+            response.status(503).json({ error: 'The tuition service is temporarily unavailable.' });
+        });
+    }
 
     app.use((_request, response) => {
         response.status(404).json({ error: 'Route not found' });
