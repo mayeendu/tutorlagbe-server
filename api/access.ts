@@ -11,6 +11,7 @@ const identitySchema = z.object({
     role: accountRole,
     plan: z.enum(['free', 'pro']),
 });
+export type AuthIdentity = z.infer<typeof identitySchema>;
 
 export function verifyToken(auth: TutorAuth): RequestHandler {
     return async (request, response, next) => {

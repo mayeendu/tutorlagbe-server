@@ -4,6 +4,7 @@ import type { Collection } from 'mongodb';
 
 import { verifyToken } from './access.ts';
 import type { TutorAuth } from './auth.ts';
+import { profileRoutes } from './profiles.ts';
 import { tuitionRoutes, type Tuition } from './tuitions.ts';
 
 interface ApiOptions {
@@ -76,6 +77,11 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions }: Api
             response.status(503).json({ error: 'The tuition service is temporarily unavailable.' });
         });
     }
+
+    if (auth) app.use('/api/profiles', profileRoutes(auth));
+    else app.use('/api/profiles', (_request, response) => {
+        response.status(503).json({ error: 'Profile management is temporarily unavailable.' });
+    });
 
     app.use((_request, response) => {
         response.status(404).json({ error: 'Route not found' });

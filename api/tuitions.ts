@@ -2,7 +2,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import { MongoServerError, ObjectId, type Collection, type Filter } from 'mongodb';
 import { z } from 'zod';
 
-import { verifyAdmin, verifyToken, verifyTutor } from './access.ts';
+import { verifyAdmin, verifyToken, verifyTutor, type AuthIdentity } from './access.ts';
 import type { TutorAuth } from './auth.ts';
 
 const mode = z.enum(['Online', 'Offline']);
@@ -27,7 +27,7 @@ const query = z.object({
     page: z.coerce.number().int().min(1).max(1000).default(1),
 });
 
-const decision = z.object({ status: z.enum(['approved', 'rejected']) });
+const decision = z.object({ status: z.enum(['approved', 'rejected']), revision: z.number().int().positive().optional() });
 const idSchema = z.string().regex(/^[\da-f]{24}$/i);
 const publicFilter = { approvalStatus: 'approved', isActive: true } as const;
 const pageSize = 24;
@@ -41,6 +41,7 @@ export type Tuition = z.infer<typeof input> & {
     isActive: boolean;
     createdAt: Date;
     freeSlot?: number;
+    revision?: number;
 };
 
 function listing(item: Tuition) {
@@ -51,6 +52,15 @@ function listing(item: Tuition) {
 }
 
 const literal = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function managedListing(item: Tuition) {
+    return { ...listing(item), approvalStatus: item.approvalStatus, isActive: item.isActive, revision: item.revision };
+}
+
+function ownerFilter(user: AuthIdentity): Filter<Tuition> {
+    if (user.role === 'admin') return {};
+    return { tutorId: user.id };
+}
 
 export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth) {
     const router = express.Router();
@@ -81,6 +91,73 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
     if (auth) {
         const authenticate = verifyToken(auth);
         const parseJson = express.json({ limit: '8kb' });
+        const verifyManager: express.RequestHandler = (_request, response, next) => {
+            const user: AuthIdentity = response.locals.identity;
+            if (user.role === 'student') {
+                response.status(403).json({ error: 'Access denied.' });
+                return;
+            }
+            next();
+        };
+
+        router.get('/manage', authenticate, verifyManager, async (request, response) => {
+            const page = query.pick({ page: true }).safeParse(request.query);
+            if (!page.success) {
+                response.status(400).json({ error: 'Invalid page.' });
+                return;
+            }
+            const rows = await collection.find(ownerFilter(response.locals.identity))
+                .sort({ createdAt: -1, _id: -1 }).skip((page.data.page - 1) * pageSize).limit(pageSize + 1).toArray();
+            response.json({ items: rows.slice(0, pageSize).map(managedListing), hasMore: rows.length > pageSize && page.data.page < 1000 });
+        });
+
+        const managed = express.Router({ mergeParams: true });
+        router.use('/manage/:id', authenticate, verifyManager, managed);
+        managed.use((request, response, next) => {
+            const id = idSchema.safeParse(request.params.id);
+            if (!id.success) {
+                response.status(404).json({ error: 'Tuition not found.' });
+                return;
+            }
+            response.locals.tuitionFilter = { _id: new ObjectId(id.data), ...ownerFilter(response.locals.identity) };
+            next();
+        });
+
+        managed.get('/', async (_request, response) => {
+            const row = await collection.findOne(response.locals.tuitionFilter);
+            if (!row) {
+                response.status(404).json({ error: 'Tuition not found.' });
+                return;
+            }
+            response.json(managedListing(row));
+        });
+
+        managed.patch('/', parseJson, async (request, response) => {
+            const parsed = input.safeParse(request.body);
+            if (!parsed.success) {
+                response.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid tuition details.' });
+                return;
+            }
+            const user: AuthIdentity = response.locals.identity;
+            const row = await collection.findOneAndUpdate(response.locals.tuitionFilter, {
+                $set: { ...parsed.data, ...(user.role === 'tutor' ? { approvalStatus: 'pending' } : {}) },
+                $inc: { revision: 1 },
+            }, { returnDocument: 'after' });
+            if (!row) {
+                response.status(404).json({ error: 'Tuition not found.' });
+                return;
+            }
+            response.json(managedListing(row));
+        });
+
+        managed.delete('/', async (_request, response) => {
+            const result = await collection.deleteOne(response.locals.tuitionFilter);
+            if (!result.deletedCount) {
+                response.status(404).json({ error: 'Tuition not found.' });
+                return;
+            }
+            response.sendStatus(204);
+        });
 
         router.post('/', authenticate, verifyTutor, parseJson, async (request, response) => {
             const parsed = input.safeParse(request.body);
@@ -135,7 +212,7 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
             }
             const rows = await collection.find({ approvalStatus: 'pending' }).sort({ createdAt: 1, _id: 1 })
                 .skip((page.data.page - 1) * pageSize).limit(pageSize + 1).toArray();
-            response.json({ items: rows.slice(0, pageSize).map(listing), hasMore: rows.length > pageSize && page.data.page < 1000 });
+            response.json({ items: rows.slice(0, pageSize).map(managedListing), hasMore: rows.length > pageSize && page.data.page < 1000 });
         });
 
         router.patch('/:id/moderation', authenticate, verifyAdmin, parseJson, async (request, response) => {
@@ -145,17 +222,18 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
                 response.status(400).json({ error: 'Invalid moderation request.' });
                 return;
             }
-            const result = await collection.updateOne({ _id: new ObjectId(id.data), approvalStatus: 'pending' }, {
+            const result = await collection.updateOne({ _id: new ObjectId(id.data), approvalStatus: 'pending',
+                revision: parsed.data.revision ?? { $exists: false } }, {
                 $set: { approvalStatus: parsed.data.status },
             });
             if (!result.modifiedCount) {
-                response.status(409).json({ error: 'This tuition is no longer pending.' });
+                response.status(409).json({ error: 'This tuition changed or is no longer pending. Refresh the queue.' });
                 return;
             }
             response.json({ approvalStatus: parsed.data.status });
         });
     } else {
-        router.all(['/moderation', '/:id/moderation'], (_request, response) => {
+        router.all(['/moderation', '/:id/moderation', '/manage', '/manage/:id'], (_request, response) => {
             response.status(503).json({ error: 'Authentication is temporarily unavailable.' });
         });
         router.post('/', (_request, response) => {

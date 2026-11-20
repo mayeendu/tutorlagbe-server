@@ -25,6 +25,8 @@ export function createAuth({ database, baseURL, secret, google }: AuthOptions) {
             additionalFields: {
                 role: { type: 'string', defaultValue: 'student', validator: { input: registrationRole } },
                 plan: { type: 'string', defaultValue: 'free', input: false },
+                phone: { type: 'string', required: false, input: false },
+                bio: { type: 'string', required: false, input: false },
             },
         },
         hooks: {
