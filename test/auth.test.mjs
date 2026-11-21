@@ -397,6 +397,9 @@ test('students apply once, track or cancel pending applications, and only the ow
     assert.equal('studentPhone' in created, false);
     const mine = await (await request(base + '/mine?tuitionId=' + body.tuitionId, { token: student.token })).json();
     assert.deepEqual(mine.items.map(({ id }) => id), [created.id]);
+    const acceptedCourses = async (token) =>
+        (await (await request(base + '/mine?status=accepted', { token })).json()).items;
+    assert.deepEqual(await acceptedCourses(student.token), []);
     assert.equal((await request(base + '/received', { token: student.token })).status, 403);
     assert.deepEqual((await (await request(base + '/mine', { token: anotherStudent.token })).json()).items, []);
     assert.deepEqual((await (await request(base + '/received', { token: stranger.token })).json()).items, []);
@@ -421,10 +424,12 @@ test('students apply once, track or cancel pending applications, and only the ow
     const reapplied = await (await apply(anotherStudent.token)).json();
     assert.equal((await review(tutor.token, 'rejected', reapplied.id)).status, 200);
     assert.equal((await (await request(base + '/mine', { token: anotherStudent.token })).json()).items[0].status, 'rejected');
+    assert.deepEqual(await acceptedCourses(anotherStudent.token), []);
 
     const secondListing = { ...listing, _id: new ObjectId() };
     listings.push(secondListing);
     const racing = await (await apply(student.token, { ...body, tuitionId: secondListing._id.toHexString() })).json();
+    assert.deepEqual((await acceptedCourses(student.token)).map(({ id }) => id), [created.id]);
     const [reviewed, cancelled] = await Promise.all([review(tutor.token, 'accepted', racing.id), cancel(student.token, racing.id)]);
     if (reviewed.status === 200) assert.equal(cancelled.status, 409);
     else {

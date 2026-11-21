@@ -91,7 +91,9 @@ export function applicationRoutes(auth: TutorAuth, applications: Collection<Appl
         response.status(201).json(applicationView(row, false));
     });
 
-    const listQuery = z.object({ page, tuitionId: id.optional() });
+    const listQuery = z.object({
+        page, tuitionId: id.optional(), status: z.enum(['pending', 'accepted', 'rejected']).optional(),
+    });
     for (const [path, forTutor, guard] of [
         ['/mine', false, verifyStudent], ['/received', true, verifyTutor],
     ] as const) {
@@ -104,6 +106,7 @@ export function applicationRoutes(auth: TutorAuth, applications: Collection<Appl
             const user: AuthIdentity = response.locals.identity;
             const filter: Filter<Application> = forTutor ? { tutorId: user.id } : { studentId: user.id };
             if (query.data.tuitionId) filter.tuitionId = new ObjectId(query.data.tuitionId);
+            if (query.data.status) filter.status = query.data.status;
             const number = query.data.page;
             const rows = await applications.find(filter).sort({ appliedAt: -1, _id: -1 })
                 .skip((number - 1) * pageSize).limit(pageSize + 1).toArray();
