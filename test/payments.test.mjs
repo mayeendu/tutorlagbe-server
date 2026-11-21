@@ -81,8 +81,8 @@ test('Stripe billing covers authenticated role prices, verified invoices, renewa
     const tuitions = {
         createIndex: async () => 'fixture_slot', countDocuments: async () => 0,
         async insertOne(item) {
-            if (item.freeSlot !== undefined && listings.some((existing) => existing.tutorId === item.tutorId && existing.freeSlot === item.freeSlot)) {
-                throw new MongoServerError({ code: 11000, keyPattern: { freeSlot: 1 } });
+            if (item.freePostingSlot !== undefined && listings.some((existing) => existing.tutorId === item.tutorId && existing.freePostingSlot === item.freePostingSlot)) {
+                throw new MongoServerError({ code: 11000, keyPattern: { freePostingSlot: 1 } });
             }
             listings.push(item);
         },

@@ -42,7 +42,7 @@ export type Tuition = z.infer<typeof input> & {
     approvalStatus: 'pending' | 'approved' | 'rejected';
     isActive: boolean;
     createdAt: Date;
-    freeSlot?: number;
+    freePostingSlot?: number;
     revision?: number;
 };
 
@@ -169,6 +169,7 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
             }
 
             const tutor = response.locals.identity;
+            response.locals.tuitionWriteStage = 'insert';
             const item: Tuition = {
                 ...parsed.data, _id: new ObjectId(), tutorId: tutor.id, tutorName: tutor.name,
                 tutorEmail: tutor.email, approvalStatus: 'pending', isActive: true, createdAt: new Date(),
@@ -180,33 +181,49 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
                 return;
             }
 
-            slotIndex ??= collection.createIndex({ tutorId: 1, freeSlot: 1 }, {
-                name: 'unique_tutor_free_slot', unique: true,
-                partialFilterExpression: { freeSlot: { $exists: true } },
+            const owned: Filter<Tuition> = {
+                $or: [{ tutorId: tutor.id }, { tutorId: { $exists: false }, tutorEmail: tutor.email }],
+            };
+            const limitReached = () => response.status(409).json({
+                error: 'Free tutors can post up to two tuitions.',
+                code: 'TUITION_LIMIT_REACHED',
+            });
+            response.locals.tuitionWriteStage = 'quota';
+            const existing = await collection.countDocuments(owned, { limit: 2 });
+            if (existing >= 2) {
+                limitReached();
+                return;
+            }
+
+            response.locals.tuitionWriteStage = 'index';
+            // Old listings can share a legacy freeSlot. A new field isolates the
+            // unique index while those listings still count toward the quota.
+            slotIndex ??= collection.createIndex({ tutorId: 1, freePostingSlot: 1 }, {
+                name: 'unique_tutor_free_posting_slot', unique: true,
+                partialFilterExpression: { freePostingSlot: { $exists: true } },
             }).catch((error: unknown) => {
                 slotIndex = undefined;
                 throw error;
             });
             await slotIndex;
+            response.locals.tuitionWriteStage = 'quota';
             const untracked = await collection.countDocuments({
-                freeSlot: { $exists: false },
-                $or: [{ tutorId: tutor.id }, { tutorId: { $exists: false }, tutorEmail: tutor.email }],
+                ...owned,
+                freePostingSlot: { $exists: false },
             }, { limit: 2 });
 
-            for (let freeSlot = 0; freeSlot < 2 - untracked; freeSlot++) {
+            response.locals.tuitionWriteStage = 'insert';
+            for (let freePostingSlot = 0; freePostingSlot < 2 - untracked; freePostingSlot++) {
                 try {
-                    await collection.insertOne({ ...item, freeSlot });
+                    await collection.insertOne({ ...item, freePostingSlot });
                     response.status(201).json({ ...listing(item), approvalStatus: item.approvalStatus });
                     return;
                 } catch (error) {
                     if (!(error instanceof MongoServerError) || error.code !== 11000 ||
-                        error.keyPattern?.freeSlot !== 1) throw error;
+                        error.keyPattern?.freePostingSlot !== 1) throw error;
                 }
             }
-            response.status(409).json({
-                error: 'Free tutors can post up to two tuitions.',
-                code: 'TUITION_LIMIT_REACHED',
-            });
+            limitReached();
         });
 
         router.get('/moderation', authenticate, verifyAdmin, async (request, response) => {
@@ -260,6 +277,17 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
         if (response.headersSent) return next(error);
         if (error.status === 400 || error.status === 413) {
             response.status(error.status).json({ error: 'Invalid request body.' });
+            return;
+        }
+        const stage = response.locals.tuitionWriteStage;
+        if (stage === 'index' || stage === 'quota' || stage === 'insert') {
+            const databaseCode = error instanceof MongoServerError && typeof error.code === 'number' ? error.code : null;
+            const reference = `TUITION_${stage.toUpperCase()}${databaseCode === null ? '' : `_${databaseCode}`}`;
+            console.error(`Tuition creation failed (${reference}).`);
+            response.status(503).json({
+                error: `Could not submit the course. Reference: ${reference}.`,
+                code: reference,
+            });
             return;
         }
         response.status(503).json({ error: 'The tuition service is temporarily unavailable.' });

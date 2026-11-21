@@ -37,7 +37,7 @@ Send `POST /api/uploads` with a Better Auth bearer token and one multipart file 
 ## Tuition publishing
 
 - `GET /api/tuitions` lists approved, active tuitions. Use `q`, `subject`, `classLevel`, `mode`, or `page` to filter results. `GET /api/tuitions/:id` applies the same visibility rules.
-- `POST /api/tuitions` creates a pending listing for the authenticated tutor. Free tutors may create two listings. The API creates a partial unique index on the first Free submission, so MongoDB must permit index creation on `tuitions`.
+- `POST /api/tuitions` creates a pending listing for the authenticated tutor. Free tutors may have two listings, including listings created before the current posting index. The first eligible Free submission creates the partial unique index `unique_tutor_free_posting_slot` on `tuitions`, so the MongoDB user needs index creation permission.
 - `GET /api/tuitions/moderation` and `PATCH /api/tuitions/:id/moderation` require an admin JWT. Send `{ "status": "approved" }` or `{ "status": "rejected" }` for a pending listing.
 - `GET /api/tuitions/manage` lists a teacher's own tuitions or all tuitions for an admin. `GET`, `PATCH`, and `DELETE /api/tuitions/manage/:id` use the same ownership rules. Teacher edits return a listing to pending review. Moderation clients send the row's `revision` when present to prevent approving a stale edit.
 - The Next.js routes are `/dashboard/tutor/post-tuition`, `/dashboard/admin/tuitions`, and `/tuitions`. They use the same `TUTORLAGBE_API_URL` configured for the auth proxy. Provision admin roles through an authorized administrative process. Public sign-up accepts Student and Tutor.

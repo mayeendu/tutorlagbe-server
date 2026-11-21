@@ -128,11 +128,11 @@ function tuitionCollection(rows) {
     }
 
     return {
-        async createIndex() { return 'unique_tutor_free_slot'; },
+        async createIndex() { return 'unique_tutor_free_posting_slot'; },
         async countDocuments(filter) { return rows.filter((row) => matches(row, filter)).length; },
         async insertOne(row) {
-            if ('freeSlot' in row && rows.some((other) => other.tutorId === row.tutorId && other.freeSlot === row.freeSlot)) {
-                throw new MongoServerError({ code: 11000, keyPattern: { tutorId: 1, freeSlot: 1 } });
+            if ('freePostingSlot' in row && rows.some((other) => other.tutorId === row.tutorId && other.freePostingSlot === row.freePostingSlot)) {
+                throw new MongoServerError({ code: 11000, keyPattern: { tutorId: 1, freePostingSlot: 1 } });
             }
             rows.push(row);
         },
@@ -226,6 +226,78 @@ test('limits concurrent Free posts and only publishes tuitions approved by an ad
 
     await adapter.update({ model: 'user', where: [{ field: 'id', value: tutor.id }], update: { plan: 'pro' } });
     assert.equal((await post(tutor.token)).status, 201);
+});
+
+test('returns the Free posting limit before attempting to create the slot index', async (context) => {
+    const rows = [];
+    const collection = tuitionCollection(rows);
+    collection.createIndex = async () => { throw new Error('Index creation unavailable'); };
+    const { request } = await startAuthApi(context, collection);
+    const tutor = await register(request, 'at-limit@example.com', 'tutor');
+    rows.push({ tutorId: tutor.id, freeSlot: 0 }, { tutorEmail: 'at-limit@example.com' });
+
+    const response = await request('/api/tuitions', { token: tutor.token, body: {
+        title: 'Another math course', subject: 'Math', classLevel: 'Class 9', mode: 'Online',
+        monthlyFee: 1500, daysPerWeek: 2, description: 'Practice algebra and geometry with guided exercises.',
+    } });
+
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).code, 'TUITION_LIMIT_REACHED');
+    assert.equal(rows.length, 2);
+});
+
+test('duplicate legacy slots do not block first posts and existing courses count toward the limit', async (context) => {
+    const rows = [];
+    const collection = tuitionCollection(rows);
+    collection.createIndex = async (keys, options) => {
+        if ('freeSlot' in keys) throw new MongoServerError({ code: 11000, message: 'Duplicate legacy slots' });
+        assert.deepEqual(keys, { tutorId: 1, freePostingSlot: 1 });
+        assert.equal(options.unique, true);
+        assert.deepEqual(options.partialFilterExpression, { freePostingSlot: { $exists: true } });
+        return options.name;
+    };
+    const { request } = await startAuthApi(context, collection);
+    const newTutor = await register(request, 'new-publisher@example.com', 'tutor');
+    const existingTutor = await register(request, 'existing-publisher@example.com', 'tutor');
+    rows.push(
+        { tutorId: 'legacy-tutor', freeSlot: 0 },
+        { tutorId: 'legacy-tutor', freeSlot: 0 },
+        { tutorId: existingTutor.id, freeSlot: 0 },
+    );
+    const post = (token) => request('/api/tuitions', { token, body: {
+        title: 'Math course', subject: 'Math', classLevel: 'Class 9', mode: 'Online',
+        monthlyFee: 1500, daysPerWeek: 2, description: 'Practice algebra and geometry with guided exercises.',
+    } });
+
+    assert.equal((await post(newTutor.token)).status, 201);
+    assert.equal((await post(newTutor.token)).status, 201);
+    assert.equal((await post(newTutor.token)).status, 409);
+    assert.equal((await post(existingTutor.token)).status, 201);
+    assert.equal((await post(existingTutor.token)).status, 409);
+    assert.equal(rows.filter((row) => row.tutorId === 'legacy-tutor').length, 2);
+});
+
+test('identifies a first-post index failure and retries initialization on the next request', async (context) => {
+    const rows = [];
+    const collection = tuitionCollection(rows);
+    const createIndex = collection.createIndex;
+    let indexAttempts = 0;
+    collection.createIndex = async () => {
+        if (++indexAttempts === 1) throw new MongoServerError({ code: 13, message: 'Unauthorized' });
+        return createIndex();
+    };
+    const { request } = await startAuthApi(context, collection);
+    const tutor = await register(request, 'first-post@example.com', 'tutor');
+    const options = { token: tutor.token, body: {
+        title: 'First math course', subject: 'Math', classLevel: 'Class 9', mode: 'Online',
+        monthlyFee: 1500, daysPerWeek: 2, description: 'Practice algebra and geometry with guided exercises.',
+    } };
+
+    const failed = await request('/api/tuitions', options);
+    assert.equal(failed.status, 503);
+    assert.equal((await failed.json()).code, 'TUITION_INDEX_13');
+    assert.equal((await request('/api/tuitions', options)).status, 201);
+    assert.equal(rows.length, 1);
 });
 
 test('enforces ownership for course edits and deletes and requires fresh moderation', async (context) => {
