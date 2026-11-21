@@ -29,6 +29,8 @@ const query = z.object({
     page: z.coerce.number().int().min(1).max(1000).default(1),
 });
 
+export { input as tuitionInput };
+
 const decision = z.object({ status: z.enum(['approved', 'rejected']), revision: z.number().int().positive().optional() });
 const idSchema = z.string().regex(/^[\da-f]{24}$/i);
 const publicFilter = { approvalStatus: 'approved', isActive: true } as const;

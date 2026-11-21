@@ -72,3 +72,14 @@ test('rejects invalid startup configuration without printing its value', () => {
     assert.match(result.stderr, /CORS_ALLOWED_ORIGINS must contain/);
     assert.doesNotMatch(result.stderr, /invalid-origin/);
 });
+
+test('reports disabled test billing without exposing settings', async (context) => {
+    const url = await startApi(context);
+    const config = await fetch(`${url}/api/payments/config`);
+    assert.equal(config.status, 200);
+    assert.equal(config.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await config.json(), { stripeTestCheckout: false, mockCheckout: false });
+    const checkout = await fetch(`${url}/api/payments/create-checkout-session`, { method: 'POST' });
+    assert.equal(checkout.status, 503);
+    assert.equal((await checkout.json()).code, 'BILLING_NOT_CONFIGURED');
+});

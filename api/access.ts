@@ -9,7 +9,7 @@ const identitySchema = z.object({
     name: z.string(),
     email: z.email(),
     role: accountRole,
-    plan: z.enum(['free', 'pro']),
+    plan: z.enum(['free', 'plus', 'pro']),
 });
 export type AuthIdentity = z.infer<typeof identitySchema>;
 

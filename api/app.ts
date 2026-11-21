@@ -6,6 +6,8 @@ import { verifyToken } from './access.ts';
 import { applicationRoutes, type Application } from './applications.ts';
 import type { TutorAuth } from './auth.ts';
 import { catalogRoutes, type CatalogChange } from './catalog.ts';
+import { mockPaymentRoutes } from './mock-payments.ts';
+import type { PaymentStore } from './payment-store.ts';
 import { paymentRoutes, type BillingOptions } from './payments.ts';
 import { getTeacher, listTeachers, profileRoutes } from './profiles.ts';
 import { tuitionRoutes, type Tuition } from './tuitions.ts';
@@ -19,10 +21,11 @@ interface ApiOptions {
     applications?: Collection<Application>;
     catalog?: Collection<CatalogChange>;
     billing?: BillingOptions;
+    mockPayments?: Pick<PaymentStore, 'mockCheckout'>;
     imageUploadKey?: string;
 }
 
-export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications, catalog, billing, imageUploadKey }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications, catalog, billing, mockPayments, imageUploadKey }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -101,6 +104,15 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, appli
         response.status(503).json({ error: 'Applications are temporarily unavailable.' });
     });
 
+    const mockCheckout = process.env.NODE_ENV !== 'production' && process.env.ENABLE_MOCK_PAYMENTS === 'true';
+    app.get('/api/payments/config', (_request, response) => {
+        response.set('Cache-Control', 'no-store').json({ stripeTestCheckout: Boolean(auth && billing),
+            mockCheckout: Boolean(mockCheckout && auth && mockPayments) });
+    });
+    if (mockCheckout && auth && mockPayments) app.use('/api/payments/mock-checkout', mockPaymentRoutes(auth, mockPayments));
+    else app.post('/api/payments/mock-checkout', (_request, response) => {
+        response.set('Cache-Control', 'no-store').status(404).json({ error: 'Route not found' });
+    });
     if (auth && billing) app.use('/api/payments', paymentRoutes(auth, billing));
     else app.use('/api/payments', (_request, response) => {
         response.status(503).json({ error: 'Stripe billing has not been configured on the server.', code: 'BILLING_NOT_CONFIGURED' });

@@ -1,6 +1,11 @@
 import { MongoServerError, ObjectId, type ClientSession, type Db, type MongoClient } from 'mongodb';
 
 export type PaidRole = 'student' | 'tutor';
+export type MockPlan = 'plus' | 'pro';
+type MockPurchase = { role: PaidRole; amount: number; paidAt: Date };
+type MockPayment = Pick<Payment, '_id' | 'userId' | 'userRole' | 'userName' | 'userEmail' | 'currency' | 'amount' | 'paidAt'> & {
+    provider: 'mock'; status: 'paid'; plan: MockPlan; planName: 'Plus' | 'Pro'; createdAt: Date; updatedAt: Date;
+};
 export type CheckoutAttempt = { key: string; email: string; role: PaidRole; sessionId?: string; kind?: 'one-time' };
 export type Payment = {
     _id: string;
@@ -40,6 +45,7 @@ type BillingUser = {
     stripeEndedSubscriptions?: string[];
     stripeEventAt?: number;
     proPaymentSessionId?: string;
+    mockPurchases?: Partial<Record<MockPlan, MockPurchase>>;
 };
 
 function owner(id: string) {
@@ -48,27 +54,50 @@ function owner(id: string) {
 
 export function paymentStore(client: MongoClient, database: Db, userCollection: 'user' | 'users' = 'user') {
     const users = database.collection<BillingUser>(userCollection);
-    const payments = database.collection<Payment | CheckoutPayment>('payments');
+    const payments = database.collection<Payment | CheckoutPayment | MockPayment>('payments');
     let checkoutIndex: Promise<string> | undefined;
 
-    async function transactionWhenAvailable(write: (session?: ClientSession) => Promise<void>) {
+    async function transactionWhenAvailable<T>(write: (session?: ClientSession) => Promise<T>) {
         try {
-            await client.withSession((session) => session.withTransaction(() => write(session)));
+            return await client.withSession((session) => session.withTransaction(() => write(session)));
         } catch (error) {
             if (!(error instanceof MongoServerError) || error.code !== 20 ||
                 !error.message.includes('Transaction numbers are only allowed')) throw error;
-            await write();
+            return write();
         }
     }
     return {
         user: (id: string) => users.findOne(owner(id)),
         async reserve(id: string, previous: string | undefined, attempt: CheckoutAttempt) {
-            const result = await users.updateOne({ ...owner(id), plan: 'free', role: attempt.role,
+            const result = await users.updateOne({ ...owner(id), plan: { $in: ['free', 'plus'] }, role: attempt.role,
                 'stripeCheckout.key': previous ?? { $exists: false } }, { $set: { stripeCheckout: attempt } });
             return result.modifiedCount === 1;
         },
         async saveSession(id: string, attempt: string, sessionId: string) {
             await users.updateOne({ ...owner(id), 'stripeCheckout.key': attempt }, { $set: { 'stripeCheckout.sessionId': sessionId } });
+        },
+        mockCheckout(id: string, role: PaidRole, plan: MockPlan, amount: number) {
+            const purchaseKey = `mockPurchases.${plan}`;
+            const account = { ...owner(id), role };
+            return transactionWhenAvailable(async (session) => {
+                const paidAt = new Date();
+                const user = await users.findOneAndUpdate({
+                    ...account, plan: { $in: plan === 'plus' ? ['free'] : ['free', 'plus'] },
+                    [purchaseKey]: { $exists: false },
+                }, { $set: { plan, [purchaseKey]: { role, amount, paidAt }, updatedAt: paidAt } },
+                { returnDocument: 'after', session }) ?? await users.findOne(account, { session });
+                const purchase = user?.mockPurchases?.[plan];
+                if (!user || !purchase) return null;
+
+                const payment: MockPayment = {
+                    _id: `mock:${id}:${plan}`, userId: id, userRole: purchase.role, userName: user.name,
+                    userEmail: user.email, plan, planName: plan === 'plus' ? 'Plus' : 'Pro', provider: 'mock', status: 'paid',
+                    amount: purchase.amount, currency: 'usd', paidAt: purchase.paidAt,
+                    createdAt: purchase.paidAt, updatedAt: purchase.paidAt,
+                };
+                await payments.updateOne({ _id: payment._id }, { $setOnInsert: payment }, { upsert: true, session });
+                return { plan: payment.plan, paymentId: payment._id };
+            });
         },
         async record(payment: Payment, entitled: boolean, eventAt: number) {
             await client.withSession((session) => session.withTransaction(async () => {

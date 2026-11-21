@@ -2,7 +2,11 @@
 
 Run `npm run dev` from this repository. For production, run `npm run build` followed by `npm start`. Run `npm test` for the local HTTP integration tests and `npm run typecheck` for TypeScript checks.
 
+Run `npm run seed:tuitions` against the configured database to populate an underfilled catalog with 12 approved listings linked to six sample teacher profiles. The command uses stable IDs, preserves existing records, and skips catalogs that already have at least 12 active, approved listings linked to tutors across at least eight subjects. Use `npm run seed:tuitions -- --check` to check the threshold without writing records. Sample profiles have no login credentials.
+
 When both repositories are in the TutorLagbe workspace, `node scripts/dev.mjs` from the workspace root starts them together for local development. It reuses existing auth settings and configures the Next.js proxy in the child process environment. The launcher waits for MongoDB readiness and leaves local environment files untouched.
+
+For separate `npm run dev` processes in this workspace, Next.js defaults to Express on `http://127.0.0.1:8000` when `TUTORLAGBE_API_URL` is unset. Express uses the sibling client's local Better Auth settings when Express has neither database URI configured. Set `TUTORLAGBE_API_URL` explicitly if Express uses a different port. Production uses the settings of each deployed service.
 
 | Setting | Purpose |
 | --- | --- |
@@ -64,7 +68,7 @@ Students pay $10 USD and tutors pay $15 USD once. Express derives the account, r
    stripe listen --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired,payment_intent.payment_failed --forward-to http://127.0.0.1:8000/api/payments/webhook
    ```
 
-3. From the workspace root, start both apps with `node scripts/dev.mjs`. Pro uses Stripe Checkout when Express has both Stripe settings and otherwise uses the local mock. Plus uses the mock in development. To opt in to Stripe for Pro when running Next.js separately, set `TUTORLAGBE_CHECKOUT_MODE=stripe` after configuring Express. Set `TUTORLAGBE_CHECKOUT_MODE=mock` to keep both plans in the local simulation.
+3. From the workspace root, start both apps with `node scripts/dev.mjs`. The launcher sets `TUTORLAGBE_API_URL` for Next.js. When starting the apps separately, set it to the Express origin, for example `http://127.0.0.1:8000`, and set `BETTER_AUTH_URL` to the browser-facing Next.js origin. Express reads its repository's `.env` regardless of the startup directory. Pro uses Stripe when Express reports `stripeTestCheckout: true` at `GET /api/payments/config`.
 4. Sign in as a Free student or tutor and select Pro. Confirm the amount on Stripe and pay with test card `4242 4242 4242 4242`, a future expiry, and any three-digit CVC. Verify the result page, account plan, and paid entry under `/payment/history`. Repeat with the other role.
 5. Use Stripe's declined test card `4000 0000 0000 0002` to verify failed payment handling. Use Checkout's back link to verify the cancel page. An abandoned Checkout stays reusable until it expires. To test expiry, use `stripe checkout sessions expire cs_test_...` on an open test session from this app. Generic CLI fixtures lack this app's account metadata and are ignored for fulfillment.
 
@@ -73,3 +77,14 @@ The webhook verifies signatures against the original request body, ignores live 
 For a new database using the assignment's `users` collection, set `TUTORLAGBE_USER_COLLECTION=users` for Express and Next.js before registering accounts. Existing installations default to Better Auth's `user` collection. To rename an existing collection, stop all app instances, back up the database, and use MongoDB's collection rename with destination replacement disabled. Set both apps to use `users` before restarting. Keeping the same account IDs preserves existing references.
 
 Existing Stripe test subscriptions can still be managed through the billing portal. If you have those subscriptions, also forward `invoice.paid` and the `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, and `customer.subscription.paused` events. New upgrades use one-time Checkout.
+
+## Local mock payments
+
+In PowerShell at the workspace root, run:
+
+```powershell
+$env:ENABLE_MOCK_PAYMENTS = 'true'
+node scripts/dev.mjs
+```
+
+Sign in as a student or tutor, then choose Plus ($10) or Pro ($10 for students and $15 for tutors). The mock updates the account in the configured database and creates a paid record with provider `mock`. Use a development database for these upgrades. When Stripe test checkout is also configured, set `TUTORLAGBE_CHECKOUT_MODE=mock` in the Next.js shell to use mock Pro checkout. Express returns 404 for mock checkout in production, even when the flag is set.

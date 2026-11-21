@@ -5,6 +5,7 @@
   "main": "dist/start.js",
   "scripts": {
     "test": "node --test",
+    "seed:tuitions": "node scripts/seed-tuitions.ts",
     "dev": "node --watch api/start.ts",
     "build": "tsc -p tsconfig.api.json",
     "typecheck": "tsc -p tsconfig.api.json --noEmit",

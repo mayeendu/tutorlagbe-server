@@ -172,6 +172,7 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
         return call('/api/payments/webhook', { method: 'POST', body, signature: valid ? sign(body) : 'invalid' });
     };
     const student = await register('student'), tutor = await register('tutor'), admin = await register('admin');
+    assert.deepEqual(await (await call('/api/payments/config')).json(), { stripeTestCheckout: true, mockCheckout: false });
     const checkout = token => call('/api/payments/create-checkout-session', { method: 'POST', token,
         body: JSON.stringify({ amount: 1, role: 'admin', userId: admin.id }) });
     const postTuition = () => call('/api/tuitions', { method: 'POST', token: tutor.token,

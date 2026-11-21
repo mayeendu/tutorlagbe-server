@@ -1,5 +1,6 @@
-import 'dotenv/config';
+import { fileURLToPath } from 'node:url';
 import { mongodbAdapter } from '@better-auth/mongo-adapter';
+import { config } from 'dotenv';
 import { MongoClient } from 'mongodb';
 
 import { createApi } from './app.ts';
@@ -12,6 +13,23 @@ import { stripeGateway } from './stripe.ts';
 import type { Tuition } from './tuitions.ts';
 
 function start() {
+    config({ path: fileURLToPath(new URL('../.env', import.meta.url)), quiet: true });
+    if (process.env.npm_lifecycle_event === 'dev') process.env.NODE_ENV ??= 'development';
+
+    if (process.env.NODE_ENV === 'development' && !process.env.BETTER_AUTH_DB_URI?.trim() && !process.env.MONGODB_URI?.trim()) {
+        const clientSettings: Record<string, string> = {};
+        config({
+            path: ['.env.development.local', '.env.local', '.env.development', '.env']
+                .map((name) => fileURLToPath(new URL(`../../tutorlagbe-client/${name}`, import.meta.url))),
+            processEnv: clientSettings,
+            quiet: true,
+        });
+        for (const key of ['BETTER_AUTH_DB_URI', 'BETTER_AUTH_SECRET', 'BETTER_AUTH_URL',
+            'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'TUTORLAGBE_USER_COLLECTION']) {
+            if (!process.env[key]?.trim() && clientSettings[key]?.trim()) process.env[key] = clientSettings[key];
+        }
+    }
+
     const port = Number(process.env.PORT ?? 8000);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
         throw new Error('PORT must be an integer from 1 to 65535.');
@@ -84,23 +102,25 @@ function start() {
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
     const billingUri = authUri || mongoUri;
     const authClient = billingUri ? clients.get(billingUri) : undefined;
+    const store = authClient ? paymentStore(authClient, authClient.db('tutorlagbe_db'), userCollection) : undefined;
     let billing: BillingOptions | undefined;
     if (stripeSecret || webhookSecret) {
-        if (!stripeSecret || !webhookSecret || !authOrigin || !authClient) {
+        if (!stripeSecret || !webhookSecret || !authOrigin || !store) {
             const message = 'Configure STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and Express authentication to enable billing.';
-            if (process.env.NODE_ENV !== 'development') throw new Error(message);
+            if (process.env.NODE_ENV === 'production') throw new Error(message);
             console.warn(message);
         } else if (!/^(sk|rk|rkcs)_test_\w+$/.test(stripeSecret) || !/^whsec_\w+$/.test(webhookSecret)) {
             throw new Error('Stripe billing requires a test-mode API key and a webhook signing secret.');
         } else {
             billing = { origin: authOrigin, webhookSecret,
-                stripe: stripeGateway(stripeSecret), store: paymentStore(authClient, authClient.db('tutorlagbe_db'), userCollection) };
+                stripe: stripeGateway(stripeSecret), store };
         }
     }
     const app = createApi({
         allowedOrigins,
         auth,
         billing,
+        mockPayments: store,
         imageUploadKey: process.env.IMGBB_API_KEY?.trim(),
         tuitions: data?.collection<Tuition>('tuitions'),
         applications: data?.collection<Application>('applications'),
