@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { verifyAdmin, verifyStudent, verifyToken, verifyTutor, verifyTutorOrAdmin, type AuthIdentity } from './access.ts';
 import type { TutorAuth } from './auth.ts';
+import { databaseErrorDetails } from './database-error.ts';
 import { hostedImageUrl } from './routes/upload.routes.ts';
 
 const mode = z.enum(['Online', 'Offline']);
@@ -368,7 +369,7 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth,
         response.json(listing(row));
     });
 
-    const handleError: ErrorRequestHandler = (error, _request, response, next) => {
+    const handleError: ErrorRequestHandler = (error, request, response, next) => {
         if (response.headersSent) return next(error);
         if (error.status === 400 || error.status === 413) {
             response.status(error.status).json({ error: 'Invalid request body.' });
@@ -385,6 +386,7 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth,
             });
             return;
         }
+        console.warn('Tuition API request failed.', { method: request.method, ...databaseErrorDetails(error) });
         response.status(503).json({ error: 'The tuition service is temporarily unavailable.' });
     };
     router.use(handleError);

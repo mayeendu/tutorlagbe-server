@@ -1,0 +1,5 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "builds": [{ "src": "app.ts", "use": "@vercel/node" }],
+  "routes": [{ "src": "/(.*)", "dest": "/app.ts" }]
+}

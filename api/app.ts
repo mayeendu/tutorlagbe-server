@@ -6,6 +6,7 @@ import { verifyToken } from './access.ts';
 import { applicationRoutes, listTuitionReviews, type Application } from './applications.ts';
 import type { TutorAuth } from './auth.ts';
 import { catalogRoutes, type CatalogChange } from './catalog.ts';
+import { databaseErrorDetails } from './database-error.ts';
 import { mockPaymentRoutes, mockPaymentsEnabled } from './mock-payments.ts';
 import type { PaymentStore } from './payment-store.ts';
 import { paymentRoutes, type BillingOptions } from './payments.ts';
@@ -66,7 +67,10 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, saved
 
     app.get('/readyz', async (_request, response) => {
         response.set('Cache-Control', 'no-store');
-        const ready = await checkDatabase().catch(() => false);
+        const ready = await checkDatabase().catch((error: unknown) => {
+            console.warn('MongoDB readiness check failed.', databaseErrorDetails(error));
+            return false;
+        });
         response.status(ready ? 200 : 503).json({ ready });
     });
 
@@ -90,6 +94,7 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, saved
     if (tuitions) {
         app.use('/api/tuitions', tuitionRoutes(tuitions, auth, savedTuitionAccounts));
     } else {
+        console.warn('Tuition catalog unavailable. Configure MONGODB_URI or BETTER_AUTH_DB_URI on the API service.');
         app.use('/api/tuitions', (_request, response) => {
             response.status(503).json({ error: 'The tuition service is temporarily unavailable.' });
         });

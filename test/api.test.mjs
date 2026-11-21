@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
+import { MongoServerError } from 'mongodb';
 
 import { createApi } from '../api/app.ts';
 
 const frontend = 'http://localhost:3000';
 
-async function startApi(context, checkDatabase = async () => true) {
-    const app = createApi({ allowedOrigins: new Set([frontend]), checkDatabase });
+async function startApi(context, checkDatabase = async () => true, tuitions) {
+    const app = createApi({ allowedOrigins: new Set([frontend]), checkDatabase, tuitions });
     const server = app.listen(0, '127.0.0.1');
     context.after(() => new Promise((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());
@@ -78,6 +79,20 @@ test('rejects invalid startup configuration without printing its value', () => {
     assert.equal(result.status, 1);
     assert.match(result.stderr, /CORS_ALLOWED_ORIGINS must contain/);
     assert.doesNotMatch(result.stderr, /invalid-origin/);
+});
+
+test('reports catalog database failures without logging driver messages', async (context) => {
+    const warning = context.mock.method(console, 'warn', () => {});
+    const failure = new MongoServerError({ code: 13, message: 'private-driver-details' });
+    const url = await startApi(context, async () => { throw failure; }, {
+        find() { throw failure; },
+    });
+    assert.equal((await fetch(`${url}/readyz`)).status, 503);
+    const response = await fetch(`${url}/api/tuitions`);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: 'The tuition service is temporarily unavailable.' });
+    assert.deepEqual(warning.mock.calls.map(({ arguments: args }) => args[1]?.code), [13, 13]);
+    assert.doesNotMatch(JSON.stringify(warning.mock.calls.map(({ arguments: args }) => args)), /private-driver-details/);
 });
 
 test('reports disabled test billing without exposing settings', async (context) => {

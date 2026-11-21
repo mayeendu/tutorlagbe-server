@@ -70,3 +70,5 @@ async function startServer() {
 }
 
 void startServer();
+
+export default app;
