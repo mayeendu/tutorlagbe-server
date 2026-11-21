@@ -199,6 +199,7 @@ test('limits concurrent Free posts and only publishes tuitions approved by an ad
         ...body, tutorEmail: 'forged@example.com', approvalStatus: 'approved',
     })));
     assert.deepEqual(attempts.map((result) => result.status).sort(), [201, 201, 409]);
+    assert.equal((await attempts.find((result) => result.status === 409).json()).code, 'TUITION_LIMIT_REACHED');
     const created = await attempts.find((result) => result.status === 201).json();
     assert.equal(created.approvalStatus, 'pending');
     assert.equal(rows[0].tutorEmail, 'publisher@example.com');

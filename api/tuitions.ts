@@ -203,7 +203,10 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
                         error.keyPattern?.freeSlot !== 1) throw error;
                 }
             }
-            response.status(409).json({ error: 'Free tutors can post up to two tuitions.' });
+            response.status(409).json({
+                error: 'Free tutors can post up to two tuitions.',
+                code: 'TUITION_LIMIT_REACHED',
+            });
         });
 
         router.get('/moderation', authenticate, verifyAdmin, async (request, response) => {
