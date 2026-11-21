@@ -8,8 +8,8 @@ import { createApi } from '../api/app.ts';
 
 const frontend = 'http://localhost:3000';
 
-async function startApi(context, checkDatabase = async () => true, tuitions) {
-    const app = createApi({ allowedOrigins: new Set([frontend]), checkDatabase, tuitions });
+async function startApi(context, checkDatabase = async () => true, tuitions, checkAuthDatabase) {
+    const app = createApi({ allowedOrigins: new Set([frontend]), checkDatabase, tuitions, checkAuthDatabase });
     const server = app.listen(0, '127.0.0.1');
     context.after(() => new Promise((resolve, reject) => {
         server.close((error) => error ? reject(error) : resolve());
@@ -69,6 +69,27 @@ test('reports ready, returns JSON for unknown routes, and hides database errors'
     assert.equal(new Date(timestamp).toISOString(), timestamp);
 });
 
+test('reports auth database health independently and keeps driver details out of HTTP and logs', async (context) => {
+    const warn = context.mock.method(console, 'warn', () => {});
+    const failure = new MongoServerError({ code: 18, message: 'private connection details' });
+    const healthy = await startApi(context, async () => false, undefined, async () => {});
+    const unhealthy = await startApi(context, undefined, undefined, async () => { throw failure; });
+    const unconfigured = await startApi(context);
+    for (const [origin, status, body] of [
+        [healthy, 200, 'ok'], [unhealthy, 503, 'unavailable'], [unconfigured, 503, 'unavailable'],
+    ]) {
+        const response = await fetch(`${origin}/api/health/db`);
+        assert.equal(response.status, status);
+        assert.equal(response.headers.get('cache-control'), 'no-store');
+        assert.deepEqual(await response.json(), { status: body });
+    }
+    assert.equal((await fetch(`${unhealthy}/readyz`)).status, 200);
+    const warnings = warn.mock.calls.map(({ arguments: args }) => args);
+    assert.ok(warnings.some(([, details]) => details?.code === 18));
+    assert.ok(warnings.some(([, details]) => details?.reason === 'auth_not_configured'));
+    assert.doesNotMatch(JSON.stringify(warnings), /private connection details/);
+});
+
 test('rejects invalid startup configuration without printing its value', () => {
     const result = spawnSync(process.execPath, ['api/start.ts'], {
         env: { ...process.env, PORT: '8000', CORS_ALLOWED_ORIGINS: 'invalid-origin' },
@@ -79,6 +100,30 @@ test('rejects invalid startup configuration without printing its value', () => {
     assert.equal(result.status, 1);
     assert.match(result.stderr, /CORS_ALLOWED_ORIGINS must contain/);
     assert.doesNotMatch(result.stderr, /invalid-origin/);
+});
+
+test('rejects wildcard auth origins at startup', () => {
+    const result = spawnSync(process.execPath, ['api/start.ts'], {
+        env: { ...process.env, CORS_ALLOWED_ORIGINS: 'https://tutorlagbe.example',
+            BETTER_AUTH_TRUSTED_ORIGINS: 'https://*.vercel.app' },
+        encoding: 'utf8',
+        timeout: 5000,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /BETTER_AUTH_TRUSTED_ORIGINS must contain/);
+    assert.doesNotMatch(result.stderr, /\*\.vercel\.app/);
+});
+
+test('rejects an unknown auth user collection instead of falling back to user', () => {
+    const result = spawnSync(process.execPath, ['api/start.ts'], {
+        env: { ...process.env, CORS_ALLOWED_ORIGINS: 'https://tutorlagbe.example',
+            BETTER_AUTH_TRUSTED_ORIGINS: '', TUTORLAGBE_USER_COLLECTION: 'user-typo' },
+        encoding: 'utf8',
+        timeout: 5000,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /TUTORLAGBE_USER_COLLECTION must be user or users/);
+    assert.doesNotMatch(result.stderr, /user-typo/);
 });
 
 test('reports catalog database failures without logging driver messages', async (context) => {

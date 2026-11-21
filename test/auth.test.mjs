@@ -19,9 +19,9 @@ const account = {
     role: 'tutor',
 };
 
-async function startAuthApi(context, tuitions, applications, imageUploadKey, catalog, savedTuitionAccounts) {
+async function startAuthApi(context, tuitions, applications, imageUploadKey, catalog, savedTuitionAccounts, authOptions) {
     const database = memoryAdapter({ user: [], session: [], account: [], verification: [], jwks: [] });
-    const auth = createAuth({ database, baseURL: origin, secret });
+    const auth = createAuth({ database, baseURL: origin, secret, ...authOptions });
     const app = express();
     app.get('/test/student', verifyToken(auth), verifyStudent, (_request, response) => response.sendStatus(204));
     app.get('/test/tutor', verifyToken(auth), verifyTutor, (_request, response) => response.sendStatus(204));
@@ -36,8 +36,8 @@ async function startAuthApi(context, tuitions, applications, imageUploadKey, cat
     const base = `http://127.0.0.1:${server.address().port}`;
     return {
         auth,
-        request: (path, { cookie, token, body, method = body ? 'POST' : 'GET' } = {}) => {
-            const headers = new Headers({ Origin: origin });
+        request: (path, { cookie, token, body, method = body ? 'POST' : 'GET', requestOrigin = origin } = {}) => {
+            const headers = new Headers({ Origin: requestOrigin });
             if (cookie) headers.set('Cookie', cookie);
             if (token) headers.set('Authorization', `Bearer ${token}`);
             const multipart = body instanceof FormData;
@@ -50,6 +50,23 @@ async function startAuthApi(context, tuitions, applications, imageUploadKey, cat
         },
     };
 }
+
+test('returns a safe response and diagnostic when auth storage throws', async (context) => {
+    const errorLog = context.mock.method(console, 'error', () => {});
+    const memory = memoryAdapter({ user: [], session: [], account: [], verification: [], jwks: [] });
+    const storageError = new MongoServerError({ code: 18, message: 'private connection details' });
+    const database = (options) => ({
+        ...memory(options),
+        async findOne() { throw storageError; },
+    });
+    const api = await startAuthApi(context, undefined, undefined, undefined, undefined, undefined, { database });
+    const response = await api.request('/api/auth/sign-in/email', { body: account });
+    assert.equal(response.status, 500);
+    assert.equal((await response.json()).code, 'AUTH_UNAVAILABLE');
+    const logs = errorLog.mock.calls.map(({ arguments: args }) => args);
+    assert.ok(logs.some(([, details]) => details?.code === 18));
+    assert.doesNotMatch(JSON.stringify(logs), /private connection details/);
+});
 
 function sessionCookie(response) {
     const cookie = response.headers.getSetCookie().find((value) => value.includes('session_token='));
@@ -126,6 +143,24 @@ test('rejects admin registration and self-service role changes', async (context)
     const elevated = await request('/api/auth/update-user', { cookie, body: { role: 'student' } });
     assert.equal(elevated.status, 400);
     assert.equal((await (await request('/api/auth/get-session', { cookie })).json()).user.role, 'tutor');
+});
+
+test('accepts an explicitly trusted HTTPS frontend alias and keeps secure sessions', async (context) => {
+    const alias = 'https://preview.tutorlagbe.example';
+    const { request } = await startAuthApi(context, undefined, undefined, undefined, undefined, undefined,
+        { trustedOrigins: [alias] });
+    assert.equal((await request('/api/auth/sign-up/email', { body: account })).status, 200);
+    const credentials = { email: account.email, password: account.password };
+    const foreign = await request('/api/auth/sign-in/email', { body: credentials, requestOrigin: `${alias}.other.example` });
+    assert.equal(foreign.status, 403);
+    assert.equal((await foreign.json()).code, 'INVALID_ORIGIN');
+    const login = await request('/api/auth/sign-in/email', { body: credentials, requestOrigin: alias });
+    assert.equal(login.status, 200);
+    const cookie = sessionCookie(login);
+    assert.match(cookie, /^__Secure-/);
+    const session = await request('/api/auth/get-session', { cookie, requestOrigin: alias });
+    assert.equal((await session.json()).user.email, account.email);
+    assert.equal((await request('/api/auth/token', { cookie, requestOrigin: alias })).status, 200);
 });
 
 function tuitionCollection(rows) {

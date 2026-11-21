@@ -17,6 +17,7 @@ import { uploadRoutes } from './routes/upload.routes.ts';
 interface ApiOptions {
     allowedOrigins: ReadonlySet<string>;
     checkDatabase: () => Promise<boolean>;
+    checkAuthDatabase?: () => Promise<void>;
     auth?: TutorAuth;
     tuitions?: Collection<Tuition>;
     savedTuitionAccounts?: Collection<SavedTuitionAccount>;
@@ -27,7 +28,7 @@ interface ApiOptions {
     imageUploadKey?: string;
 }
 
-export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, savedTuitionAccounts, applications, catalog, billing, mockPayments, imageUploadKey }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, checkAuthDatabase, auth, tuitions, savedTuitionAccounts, applications, catalog, billing, mockPayments, imageUploadKey }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -74,6 +75,22 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, saved
         response.status(ready ? 200 : 503).json({ ready });
     });
 
+    app.get('/api/health/db', async (_request, response) => {
+        response.set('Cache-Control', 'no-store');
+        if (!checkAuthDatabase) {
+            console.warn('Auth database health check unavailable.', { reason: 'auth_not_configured' });
+            response.status(503).json({ status: 'unavailable' });
+            return;
+        }
+        try {
+            await checkAuthDatabase();
+            response.json({ status: 'ok' });
+        } catch (error) {
+            console.warn('Auth database ping failed.', databaseErrorDetails(error));
+            response.status(503).json({ status: 'unavailable' });
+        }
+    });
+
     if (auth) {
         app.get('/api/auth/identity', verifyToken(auth), (_request, response) => {
             response.json(response.locals.identity);
@@ -81,7 +98,16 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, saved
         const handleAuth = toNodeHandler(auth);
         app.all('/api/auth/{*path}', async (request, response) => {
             response.set('Cache-Control', 'no-store');
-            await handleAuth(request, response);
+            try {
+                await handleAuth(request, response);
+            } catch (error) {
+                console.error('Better Auth request failed.', databaseErrorDetails(error));
+                if (!response.headersSent) {
+                    response.status(500).json({ code: 'AUTH_UNAVAILABLE', message: 'Authentication is temporarily unavailable.' });
+                } else {
+                    response.end();
+                }
+            }
         });
     } else {
         app.all('/api/auth/{*path}', (_request, response) => {

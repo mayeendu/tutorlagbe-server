@@ -13,6 +13,16 @@ import type { BillingOptions } from './payments.ts';
 import { stripeGateway } from './stripe.ts';
 import type { SavedTuitionAccount, Tuition } from './tuitions.ts';
 
+function exactOrigins(value: string, setting: string) {
+    return new Set(value.split(',').map((entry) => entry.trim()).filter(Boolean).map((origin) => {
+        const url = URL.parse(origin);
+        if (!url || !['http:', 'https:'].includes(url.protocol) || url.origin !== origin || url.hostname.includes('*')) {
+            throw new Error(`${setting} must contain comma-separated HTTP(S) origins.`);
+        }
+        return origin;
+    }));
+}
+
 export function createRuntime({ allowIncompleteBilling = false } = {}) {
     if (process.env.npm_lifecycle_event === 'dev') process.env.NODE_ENV ??= 'development';
     config({ path: fileURLToPath(new URL('../.env', import.meta.url)), quiet: true });
@@ -34,16 +44,8 @@ export function createRuntime({ allowIncompleteBilling = false } = {}) {
     const defaultOrigins = process.env.NODE_ENV === 'production'
         ? ''
         : 'http://localhost:3000,http://127.0.0.1:3000';
-    const allowedOrigins = new Set<string>();
-    for (const entry of (process.env.CORS_ALLOWED_ORIGINS ?? defaultOrigins).split(',')) {
-        const origin = entry.trim();
-        if (!origin) continue;
-        const url = URL.parse(origin);
-        if (!url || !['http:', 'https:'].includes(url.protocol) || url.origin !== origin) {
-            throw new Error('CORS_ALLOWED_ORIGINS must contain comma-separated HTTP(S) origins.');
-        }
-        allowedOrigins.add(origin);
-    }
+    const allowedOrigins = exactOrigins(process.env.CORS_ALLOWED_ORIGINS ?? defaultOrigins, 'CORS_ALLOWED_ORIGINS');
+    const trustedOrigins = exactOrigins(process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? '', 'BETTER_AUTH_TRUSTED_ORIGINS');
 
     const clients = new Map<string, MongoClient>();
     function getClient(uri: string, setting: string) {
@@ -67,7 +69,10 @@ export function createRuntime({ allowIncompleteBilling = false } = {}) {
 
     const secret = process.env.BETTER_AUTH_SECRET;
     const authUri = process.env.BETTER_AUTH_DB_URI?.trim();
-    const userCollection = process.env.TUTORLAGBE_USER_COLLECTION === 'users' ? 'users' : 'user';
+    const userCollection = process.env.TUTORLAGBE_USER_COLLECTION?.trim() || 'user';
+    if (userCollection !== 'user' && userCollection !== 'users') {
+        throw new Error('TUTORLAGBE_USER_COLLECTION must be user or users.');
+    }
     let auth: ReturnType<typeof createAuth> | undefined;
     let authOrigin: string | undefined;
     if (secret || authUri || process.env.BETTER_AUTH_URL) {
@@ -80,12 +85,18 @@ export function createRuntime({ allowIncompleteBilling = false } = {}) {
         }
 
         const client = getClient(databaseUri, authUri ? 'BETTER_AUTH_DB_URI' : 'MONGODB_URI');
+        if (process.env.NODE_ENV === 'production') {
+            console.info('Better Auth storage configured.', {
+                database: 'tutorlagbe_db', userCollection, uriSetting: authUri ? 'BETTER_AUTH_DB_URI' : 'MONGODB_URI',
+            });
+        }
         const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
         const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
         authOrigin = url.origin;
         auth = createAuth({
             database: mongodbAdapter(client.db('tutorlagbe_db'), { client }),
             baseURL: authOrigin,
+            trustedOrigins: [...trustedOrigins],
             secret,
             userCollection,
             google: clientId && clientSecret ? { clientId, clientSecret } : undefined,
@@ -124,6 +135,9 @@ export function createRuntime({ allowIncompleteBilling = false } = {}) {
         savedTuitionAccounts: authClient?.db('tutorlagbe_db').collection<SavedTuitionAccount>(userCollection),
         applications: data?.collection<Application>('applications'),
         catalog: data?.collection<CatalogChange>('catalog_changes'),
+        checkAuthDatabase: auth && authClient ? async () => {
+            await authClient.db('tutorlagbe_db').command({ ping: 1 }, { timeoutMS: 3000 });
+        } : undefined,
         checkDatabase: async () => {
             if (!clients.size) return false;
             await Promise.all([...clients.values()].map((client) => client.db('admin').command({ ping: 1 })));

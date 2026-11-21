@@ -15,6 +15,7 @@ For separate `npm run dev` processes in this workspace, Next.js defaults to Expr
 | `MONGODB_URI` | Server-only MongoDB connection string for the tuition catalog and readiness checks. The catalog can also use `BETTER_AUTH_DB_URI` when this setting is absent. |
 | `BETTER_AUTH_DB_URI` | MongoDB connection string for auth. Falls back to `MONGODB_URI` when auth is configured. Use the existing auth database to preserve accounts. |
 | `BETTER_AUTH_URL` | Public Next.js origin, for example `http://localhost:3000` in development. Use HTTPS in production. |
+| `BETTER_AUTH_TRUSTED_ORIGINS` | Optional comma-separated, exact alternate frontend origins. Use HTTPS for deployed domains. The origin in `BETTER_AUTH_URL` is already trusted. |
 | `BETTER_AUTH_SECRET` | Server-only Better Auth secret of at least 32 characters. Reuse the existing auth secret for session continuity. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional Google provider settings. Supply both to enable it. |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Server-only Stripe API key and webhook signing secret. Supply both to enable billing. |
@@ -23,6 +24,12 @@ For separate `npm run dev` processes in this workspace, Next.js defaults to Expr
 `GET /` reports HTTP liveness. `GET /readyz` returns `200` when all configured MongoDB connections answer a ping or `503` when a database is unavailable or unconfigured. Supply configuration through your shell or hosting platform and keep secret values out of version control.
 
 ## Auth cutover
+
+For a Vercel frontend and a Vercel or Render API, set `TUTORLAGBE_API_URL` on Next.js to the HTTPS API origin. On Express, set `BETTER_AUTH_URL` to the HTTPS **frontend** origin because the browser uses Next.js at `/api/auth/*`. Configure `BETTER_AUTH_SECRET` and the existing authentication database URI on Express, and preserve the database's current `TUTORLAGBE_USER_COLLECTION`. Set `CORS_ALLOWED_ORIGINS` for browser API access separately from the auth allowlist. Keep Google OAuth's authorized redirect URI on the canonical frontend at `/api/auth/callback/google` if Google sign-in is enabled.
+
+After deploying Express, request `GET /api/health/db` on the API origin. It pings the MongoDB client used by Better Auth and returns only `200 {"status":"ok"}` or `503 {"status":"unavailable"}`. Check private server logs for the sanitized diagnostic if it returns 503. A successful ping confirms connectivity, but user collection selection and account read/write permissions still need a sign-in and sign-up smoke test. Allow the API host's outbound network in the Atlas project IP access list and give its database user the required access to `tutorlagbe_db`. Once the API passes the check, deploy Next.js with the Production environment updated, test email sign-up with a test account, then sign in and reload a private dashboard route.
+
+If the catalog works but email sign-in returns `401 INVALID_EMAIL_OR_PASSWORD`, check the API's production startup log for the auth database setting and selected user collection. `BETTER_AUTH_DB_URI` takes precedence for sign-in, while `MONGODB_URI` takes precedence for the catalog. Find the existing user in the selected `tutorlagbe_db` collection (`user` or `users`) and verify their `account` record with provider `credential` references the same user ID. Use the database and collection that already hold your accounts. A `403 INVALID_ORIGIN` calls for checking the frontend origin and auth allowlist.
 
 1. Configure the Express service with the same database, public origin, and secret used by the existing Next.js auth service. Verify `/readyz` before switching traffic.
 2. Set the server-only `TUTORLAGBE_API_URL` on the Next.js service to the Express origin, for example `http://localhost:8000`. Browser requests stay on the Next.js origin, where `/api/auth/*` forwards cookies and requests to Express. An unset value keeps the legacy Next.js handler active during rollout.
