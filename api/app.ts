@@ -3,6 +3,7 @@ import { toNodeHandler } from 'better-auth/node';
 import type { Collection } from 'mongodb';
 
 import { verifyToken } from './access.ts';
+import { applicationRoutes, type Application } from './applications.ts';
 import type { TutorAuth } from './auth.ts';
 import { profileRoutes } from './profiles.ts';
 import { tuitionRoutes, type Tuition } from './tuitions.ts';
@@ -12,9 +13,10 @@ interface ApiOptions {
     checkDatabase: () => Promise<boolean>;
     auth?: TutorAuth;
     tuitions?: Collection<Tuition>;
+    applications?: Collection<Application>;
 }
 
-export function createApi({ allowedOrigins, checkDatabase, auth, tuitions }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -81,6 +83,11 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions }: Api
     if (auth) app.use('/api/profiles', profileRoutes(auth));
     else app.use('/api/profiles', (_request, response) => {
         response.status(503).json({ error: 'Profile management is temporarily unavailable.' });
+    });
+
+    if (auth && applications && tuitions) app.use('/api/applications', applicationRoutes(auth, applications, tuitions));
+    else app.use('/api/applications', (_request, response) => {
+        response.status(503).json({ error: 'Applications are temporarily unavailable.' });
     });
 
     app.use((_request, response) => {

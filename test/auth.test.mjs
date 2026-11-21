@@ -19,13 +19,13 @@ const account = {
     role: 'tutor',
 };
 
-async function startAuthApi(context, tuitions) {
+async function startAuthApi(context, tuitions, applications) {
     const database = memoryAdapter({ user: [], session: [], account: [], verification: [], jwks: [] });
     const auth = createAuth({ database, baseURL: origin, secret });
     const app = express();
     app.get('/test/tutor', verifyToken(auth), verifyTutor, (_request, response) => response.sendStatus(204));
     app.get('/test/admin', verifyToken(auth), verifyAdmin, (_request, response) => response.sendStatus(204));
-    app.use(createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, tuitions }));
+    app.use(createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, tuitions, applications }));
 
     const server = app.listen(0, '127.0.0.1');
     context.after(() => new Promise((resolve, reject) => {
@@ -322,4 +322,90 @@ test('profiles support self edits and admin management without exposing auth fie
     assert.equal((await remove(profiles + '/me', admin.token)).status, 204);
     assert.equal((await request('/api/auth/identity', { token: admin.token })).status, 401);
     assert.equal((await request(profiles, { token: remaining.token })).status, 200);
+});
+
+test('students apply once, track or cancel pending applications, and only the owning tutor can review', async (context) => {
+    const listings = [];
+    const rows = [];
+    const applications = {
+        ...tuitionCollection(rows),
+        async createIndex(keys, options) {
+            assert.deepEqual(keys, { studentId: 1, tuitionId: 1 });
+            assert.equal(options.unique, true);
+            return options.name;
+        },
+        async insertOne(row) {
+            if (rows.some((item) => item.studentId === row.studentId && item.tuitionId.equals(row.tuitionId))) {
+                throw new MongoServerError({ code: 11000, keyPattern: { studentId: 1, tuitionId: 1 } });
+            }
+            rows.push(row);
+        },
+    };
+    const { request } = await startAuthApi(context, tuitionCollection(listings), applications);
+    const student = await register(request, 'applicant@example.com', 'student');
+    const anotherStudent = await register(request, 'another-student@example.com', 'student');
+    const tutor = await register(request, 'receiving-tutor@example.com', 'tutor');
+    const stranger = await register(request, 'unrelated-tutor@example.com', 'tutor');
+    const listing = { _id: new ObjectId(), title: 'Mathematics tuition', subject: 'Math', monthlyFee: 2400,
+        tutorId: tutor.id, tutorName: 'Math Tutor', tutorEmail: 'receiving-tutor@example.com',
+        approvalStatus: 'approved', isActive: true };
+    listings.push(listing);
+    const base = '/api/applications';
+    const body = { tuitionId: listing._id.toHexString(), studentPhone: '+880 1712345678',
+        preferredSchedule: 'Weekdays after 5 PM', studentNote: 'Preparing for exams.' };
+    const apply = (token, input = body) => request(base, { token, body: input });
+    assert.equal((await apply(undefined)).status, 401);
+    assert.equal((await apply(tutor.token)).status, 403);
+    assert.equal((await apply(student.token, { ...body, status: 'accepted' })).status, 400);
+    assert.equal((await apply(student.token, { ...body, studentPhone: '.......' })).status, 400);
+    listing.isActive = false;
+    assert.equal((await apply(student.token)).status, 404);
+    listing.isActive = true;
+    listing.approvalStatus = 'pending';
+    assert.equal((await apply(student.token)).status, 404);
+    listing.approvalStatus = 'approved';
+
+    const first = await Promise.all([apply(student.token), apply(student.token)]);
+    assert.deepEqual(first.map((response) => response.status).sort(), [201, 409]);
+    const created = await first.find((response) => response.status === 201).json();
+    assert.equal(created.status, 'pending');
+    assert.equal(created.monthlyFee, listing.monthlyFee);
+    assert.equal(created.tutorEmail, listing.tutorEmail);
+    assert.equal('studentPhone' in created, false);
+    const mine = await (await request(base + '/mine?tuitionId=' + body.tuitionId, { token: student.token })).json();
+    assert.deepEqual(mine.items.map(({ id }) => id), [created.id]);
+    assert.equal((await request(base + '/received', { token: student.token })).status, 403);
+    assert.deepEqual((await (await request(base + '/mine', { token: anotherStudent.token })).json()).items, []);
+    assert.deepEqual((await (await request(base + '/received', { token: stranger.token })).json()).items, []);
+    const received = (await (await request(base + '/received', { token: tutor.token })).json()).items[0];
+    assert.equal(received.studentEmail, 'applicant@example.com');
+    assert.equal(received.studentPhone, body.studentPhone);
+    assert.equal(received.studentNote, body.studentNote);
+
+    const review = (token, status, target = created.id) => request(base + '/' + target + '/status', { token, method: 'PATCH', body: { status } });
+    const cancel = (token, target = created.id) => request(base + '/' + target, { token, method: 'DELETE' });
+    assert.equal((await review(stranger.token, 'accepted')).status, 404);
+    assert.equal((await cancel(anotherStudent.token)).status, 404);
+    assert.equal((await cancel(tutor.token)).status, 403);
+    assert.equal((await review(tutor.token, 'accepted')).status, 200);
+    assert.equal((await review(tutor.token, 'rejected')).status, 409);
+    assert.equal((await cancel(student.token)).status, 409);
+    assert.equal((await (await request(base + '/mine', { token: student.token })).json()).items[0].status, 'accepted');
+
+    const second = await (await apply(anotherStudent.token)).json();
+    assert.equal((await cancel(anotherStudent.token, second.id)).status, 204);
+    assert.equal((await review(tutor.token, 'rejected', second.id)).status, 404);
+    const reapplied = await (await apply(anotherStudent.token)).json();
+    assert.equal((await review(tutor.token, 'rejected', reapplied.id)).status, 200);
+    assert.equal((await (await request(base + '/mine', { token: anotherStudent.token })).json()).items[0].status, 'rejected');
+
+    const secondListing = { ...listing, _id: new ObjectId() };
+    listings.push(secondListing);
+    const racing = await (await apply(student.token, { ...body, tuitionId: secondListing._id.toHexString() })).json();
+    const [reviewed, cancelled] = await Promise.all([review(tutor.token, 'accepted', racing.id), cancel(student.token, racing.id)]);
+    if (reviewed.status === 200) assert.equal(cancelled.status, 409);
+    else {
+        assert.equal(reviewed.status, 404);
+        assert.equal(cancelled.status, 204);
+    }
 });

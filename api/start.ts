@@ -3,6 +3,7 @@ import { mongodbAdapter } from '@better-auth/mongo-adapter';
 import { MongoClient } from 'mongodb';
 
 import { createApi } from './app.ts';
+import type { Application } from './applications.ts';
 import { createAuth } from './auth.ts';
 import type { Tuition } from './tuitions.ts';
 
@@ -70,11 +71,12 @@ function start() {
     }
 
     const tuitionUri = mongoUri || authUri;
+    const data = tuitionUri ? clients.get(tuitionUri)?.db('tutorlagbe_db') : undefined;
     const app = createApi({
         allowedOrigins,
         auth,
-        tuitions: tuitionUri ? clients.get(tuitionUri)
-            ?.db('tutorlagbe_db').collection<Tuition>('tuitions') : undefined,
+        tuitions: data?.collection<Tuition>('tuitions'),
+        applications: data?.collection<Application>('applications'),
         checkDatabase: async () => {
             if (!clients.size) return false;
             await Promise.all([...clients.values()].map((client) => client.db('admin').command({ ping: 1 })));
