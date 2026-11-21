@@ -4,10 +4,10 @@ import { z } from 'zod';
 
 import { verifyAdmin, verifyToken, type AuthIdentity } from './access.ts';
 import type { TutorAuth } from './auth.ts';
-import type { CheckoutAttempt, PaidRole, PaymentStore } from './payment-store.ts';
+import { handleCheckoutEvent, oneTimeCheckoutForm, pendingCheckout, proPrice } from './one-time-checkout.ts';
+import type { PaymentStore } from './payment-store.ts';
 import { stripeEventSchema, validStripeSignature, type StripeGateway } from './stripe.ts';
 
-const price: Record<PaidRole, number> = { student: 1000, tutor: 1500 };
 const metadata = z.object({ integration: z.literal('tutorlagbe-pro'), userId: z.string().regex(/^[\w-]{1,128}$/), role: z.enum(['student', 'tutor']) });
 const ended = new Set(['canceled', 'incomplete_expired']);
 const revoked = new Set([...ended, 'unpaid', 'paused']);
@@ -21,26 +21,10 @@ function stripeUrl(value: string | null, hostname: string) {
     return url.href;
 }
 
-function checkoutForm(origin: string, userId: string, attempt: CheckoutAttempt) {
-    const values = new URLSearchParams({
-        mode: 'subscription', customer_email: attempt.email, client_reference_id: userId,
-        success_url: `${origin}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${origin}/payment/cancel`,
-        'line_items[0][quantity]': '1', 'line_items[0][price_data][currency]': 'usd',
-        'line_items[0][price_data][unit_amount]': String(price[attempt.role]),
-        'line_items[0][price_data][recurring][interval]': 'month',
-        'line_items[0][price_data][product_data][name]': `TutorLagbe Pro · ${attempt.role === 'student' ? 'Student' : 'Teacher'}`,
-    });
-    for (const [key, value] of Object.entries({ integration: 'tutorlagbe-pro', userId, role: attempt.role })) {
-        values.set(`metadata[${key}]`, value);
-        values.set(`subscription_data[metadata][${key}]`, value);
-    }
-    return values;
-}
-
 export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, store }: BillingOptions) {
     const router = express.Router();
     const authenticate = verifyToken(auth);
+    router.use((_request, response, next) => { response.set('Cache-Control', 'no-store'); next(); });
 
     async function recordInvoice(id: string, eventAt: number, current?: Awaited<ReturnType<StripeGateway['subscription']>>) {
         const invoice = await stripe.invoice(id);
@@ -48,7 +32,7 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         if (invoice.status !== 'paid' || !subscriptionId || !invoice.payment_intent?.startsWith('pi_')) return;
         const subscription = current?.id === subscriptionId ? current : await stripe.subscription(subscriptionId);
         const claims = metadata.safeParse(subscription.metadata);
-        if (!claims.success || invoice.currency !== 'usd' || invoice.amount_paid !== price[claims.data.role]) return;
+        if (!claims.success || invoice.currency !== 'usd' || invoice.amount_paid !== proPrice[claims.data.role]) return;
 
         const checkout = await stripe.checkoutForSubscription(subscription.id);
         if (!checkout) throw new Error('Checkout is not yet available.');
@@ -83,7 +67,15 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         }
 
         const event = parsed.data;
+        if (event.livemode) {
+            response.json({ received: true });
+            return;
+        }
         const id = event.data.object.id;
+        if (['checkout.session.completed', 'checkout.session.async_payment_succeeded', 'checkout.session.async_payment_failed',
+            'checkout.session.expired', 'payment_intent.payment_failed'].includes(event.type)) {
+            await handleCheckoutEvent(event, { origin, webhookSecret, stripe, store });
+        }
         if (event.type === 'invoice.paid' && /^in_\w+$/.test(id)) {
             await recordInvoice(id, event.created);
         } else if (['customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted', 'customer.subscription.paused'].includes(event.type) && /^sub_\w+$/.test(id)) {
@@ -98,7 +90,7 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         response.json({ received: true });
     });
 
-    router.post('/checkout', authenticate, async (_request, response) => {
+    router.post(['/create-checkout-session', '/checkout'], authenticate, async (_request, response) => {
         const identity: AuthIdentity = response.locals.identity;
         if (identity.role === 'admin') {
             response.status(403).json({ error: 'Pro is available to students and teachers.' });
@@ -113,32 +105,38 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         let attempt = user.stripeCheckout;
         if (attempt?.sessionId) {
             const prior = await stripe.checkout(attempt.sessionId);
-            if (prior.status === 'open' && attempt.role === identity.role) {
+            if (prior.status === 'open' && attempt.kind === 'one-time' && attempt.role === identity.role) {
+                pendingCheckout(prior, identity.id, user.name, attempt);
                 response.json({ url: stripeUrl(prior.url, 'checkout.stripe.com') });
                 return;
             }
-            if (prior.status !== 'expired' &&
-                !(prior.status === 'complete' && prior.subscription && ended.has((await stripe.subscription(prior.subscription)).status))) {
+            const failed = prior.status === 'complete' && prior.payment_status === 'unpaid' && attempt.kind === 'one-time' &&
+                (await store.checkoutPayment(prior.id, identity.id))?.status === 'failed';
+            const legacyEnded = prior.status === 'complete' && prior.subscription &&
+                ended.has((await stripe.subscription(prior.subscription)).status);
+            if (prior.status !== 'expired' && !failed && !legacyEnded) {
                 response.status(409).json({ error: 'There is already a checkout or subscription for this account.' });
                 return;
             }
         }
         if (!attempt || attempt.sessionId) {
-            const next = { key: randomUUID(), email: identity.email, role: identity.role };
+            const next = { key: randomUUID(), email: identity.email, role: identity.role, kind: 'one-time' as const };
             if (!await store.reserve(identity.id, attempt?.key, next)) {
                 response.status(409).json({ error: 'Checkout is already being prepared. Try again shortly.' });
                 return;
             }
             attempt = next;
         }
-        if (attempt.role !== identity.role) {
-            response.status(409).json({ error: 'Your account role changed during checkout.' });
+        if (attempt.role !== identity.role || attempt.kind !== 'one-time') {
+            response.status(409).json({ error: 'A previous checkout needs to be resolved before you can continue.' });
             return;
         }
 
-        const checkout = await stripe.createCheckout(checkoutForm(origin, identity.id, attempt), `tutorlagbe-pro-${attempt.key}`);
+        const checkout = await stripe.createCheckout(oneTimeCheckoutForm(origin, identity.id, attempt), `tutorlagbe-pro-once-${attempt.key}`);
+        const url = stripeUrl(checkout.url, 'checkout.stripe.com');
+        await store.savePending(pendingCheckout(checkout, identity.id, user.name, attempt));
         await store.saveSession(identity.id, attempt.key, checkout.id);
-        response.json({ url: stripeUrl(checkout.url, 'checkout.stripe.com') });
+        response.json({ url });
     });
 
     router.get('/status/:id', authenticate, async (request, response) => {
@@ -149,6 +147,13 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         }
         const identity: AuthIdentity = response.locals.identity;
         const user = await store.user(identity.id);
+        const payment = await store.checkoutPayment(id, identity.id);
+        if (payment) {
+            response.json({ status: payment.status === 'paid'
+                ? user?.plan === 'pro' && user.proPaymentSessionId === id ? 'active' : 'pending'
+                : payment.status });
+            return;
+        }
         if (user?.stripeCheckout?.sessionId !== id) {
             response.status(404).json({ error: 'Checkout session not found.' });
             return;
@@ -172,6 +177,18 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         }
         const billing = await stripe.portal(subscription.customer, `${origin}/pricing`);
         response.json({ url: stripeUrl(billing.url, 'billing.stripe.com') });
+    });
+
+    router.get('/history', authenticate, async (request, response) => {
+        const page = z.coerce.number().int().min(1).max(1000).default(1).safeParse(request.query.page);
+        if (!page.success) {
+            response.status(400).json({ error: 'Invalid payment page.' });
+            return;
+        }
+        const id: string = response.locals.identity.id;
+        const [rows, user] = await Promise.all([store.history(id, (page.data - 1) * 24, 25), store.user(id)]);
+        response.json({ items: rows.slice(0, 24), hasMore: rows.length > 24 && page.data < 1000,
+            canManageSubscription: Boolean(user?.stripeSubscriptionId) });
     });
 
     router.get('/transactions', authenticate, verifyAdmin, async (request, response) => {

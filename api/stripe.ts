@@ -5,6 +5,11 @@ const metadata = z.record(z.string(), z.string()).optional();
 export const checkoutSchema = z.object({
     id: z.string().regex(/^cs_[\w]+$/), status: z.enum(['open', 'complete', 'expired']),
     url: z.url().nullable(), subscription: z.string().nullable(), metadata,
+    livemode: z.boolean().optional(), mode: z.string().optional(),
+    client_reference_id: z.string().nullable().optional(),
+    amount_total: z.number().int().nonnegative().nullable().optional(),
+    currency: z.string().nullable().optional(), payment_status: z.string().optional(),
+    payment_intent: z.string().nullable().optional(), customer: z.string().nullable().optional(),
 });
 export const subscriptionSchema = z.object({ id: z.string().regex(/^sub_[\w]+$/), status: z.string(), customer: z.string(),
     latest_invoice: z.string().nullable().optional(), metadata });
@@ -15,7 +20,10 @@ export const invoiceSchema = z.object({
     parent: z.object({ subscription_details: z.object({ subscription: z.string() }).nullable().optional() }).nullable().optional(),
     status_transitions: z.object({ paid_at: z.number().int().positive().nullable() }).optional(),
 });
-export const stripeEventSchema = z.object({ type: z.string(), created: z.number().int().positive(), data: z.object({ object: z.object({ id: z.string() }) }) });
+export const stripeEventSchema = z.object({
+    id: z.string().regex(/^evt_\w+$/), livemode: z.boolean(), type: z.string(), created: z.number().int().positive(),
+    data: z.object({ object: z.object({ id: z.string(), metadata }) }),
+});
 
 export function validStripeSignature(body: Buffer, header: string, secret: string, now = Date.now()) {
     const parts = header.split(',').map((part) => part.trim().split('='));

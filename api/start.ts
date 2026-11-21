@@ -53,6 +53,7 @@ function start() {
 
     const secret = process.env.BETTER_AUTH_SECRET;
     const authUri = process.env.BETTER_AUTH_DB_URI?.trim();
+    const userCollection = process.env.TUTORLAGBE_USER_COLLECTION === 'users' ? 'users' : 'user';
     let auth: ReturnType<typeof createAuth> | undefined;
     let authOrigin: string | undefined;
     if (secret || authUri || process.env.BETTER_AUTH_URL) {
@@ -72,6 +73,7 @@ function start() {
             database: mongodbAdapter(client.db('tutorlagbe_db'), { client }),
             baseURL: authOrigin,
             secret,
+            userCollection,
             google: clientId && clientSecret ? { clientId, clientSecret } : undefined,
         });
     }
@@ -85,10 +87,15 @@ function start() {
     let billing: BillingOptions | undefined;
     if (stripeSecret || webhookSecret) {
         if (!stripeSecret || !webhookSecret || !authOrigin || !authClient) {
-            throw new Error('Configure STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and Express authentication to enable billing.');
+            const message = 'Configure STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and Express authentication to enable billing.';
+            if (process.env.NODE_ENV !== 'development') throw new Error(message);
+            console.warn(message);
+        } else if (!/^(sk|rk|rkcs)_test_\w+$/.test(stripeSecret) || !/^whsec_\w+$/.test(webhookSecret)) {
+            throw new Error('Stripe billing requires a test-mode API key and a webhook signing secret.');
+        } else {
+            billing = { origin: authOrigin, webhookSecret,
+                stripe: stripeGateway(stripeSecret), store: paymentStore(authClient, authClient.db('tutorlagbe_db'), userCollection) };
         }
-        billing = { origin: authOrigin, webhookSecret,
-            stripe: stripeGateway(stripeSecret), store: paymentStore(authClient, authClient.db('tutorlagbe_db')) };
     }
     const app = createApi({
         allowedOrigins,

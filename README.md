@@ -52,11 +52,24 @@ Use `GET /api/profiles/me` to read your own profile and `PATCH /api/profiles/me`
 - Students use `GET /api/applications/mine` to track their applications and `DELETE /api/applications/:id` to cancel a pending application. A cancelled application can be submitted again.
 - Teachers use `GET /api/applications/received` to see applications to their tuitions and `PATCH /api/applications/:id/status` to accept or reject a pending application. Application contact information is available only through the protected dashboards.
 
-## Stripe Pro billing
+## Stripe Pro Checkout in test mode
 
-1. Configure the Stripe settings in the Express process and keep the Next.js `TUTORLAGBE_API_URL` pointed at Express. Billing uses the same MongoDB database as Better Auth and needs transaction support. Use Stripe test mode for the first run.
-2. In Stripe, send `invoice.paid`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, and `customer.subscription.paused` to the Express `POST /api/payments/webhook` endpoint. For local testing, forward the same events with Stripe CLI and use the signing secret it provides.
-3. Enable the Stripe Customer Portal for payment-method management and cancellation. Keep plan switching and discounts disabled for this integration. Checkout uses fixed monthly prices of USD $10 for students and $15 for teachers.
-4. Open `/pricing` with a student or teacher account and complete a test checkout. Verify the payment result, Pro status in the profile, and the invoice under `/dashboard/admin/transactions`. Cancelling a subscription at period end keeps access until Stripe reports that the subscription has ended.
+Students pay $10 USD and tutors pay $15 USD once. Express derives the account, role, and price from the authenticated session. `POST /api/payments/create-checkout-session` returns a Stripe-hosted Checkout URL. `GET /api/payments/history` shows the signed-in account's attempts. The existing admin transactions view continues to show paid transactions.
 
-Express verifies Stripe signatures against the raw request body, retrieves the invoice and subscription from Stripe, and records each paid invoice once. The payment record and plan update use a MongoDB transaction. The payment result page only reads status for the signed-in account.
+1. Copy the settings you need from each repository's `.env.example` into its local environment. Set the Express `STRIPE_SECRET_KEY` to the secret API key from your Stripe sandbox. Use an isolated test database if you want to keep test upgrades separate from other accounts.
+2. Sign in to Stripe CLI and run the following command. Use your Express port if it differs from 8000. Save the listener's signing secret as `STRIPE_WEBHOOK_SECRET` in the Express environment and keep the listener running.
+
+   ```sh
+   stripe login
+   stripe listen --events checkout.session.completed,checkout.session.async_payment_succeeded,checkout.session.async_payment_failed,checkout.session.expired,payment_intent.payment_failed --forward-to http://127.0.0.1:8000/api/payments/webhook
+   ```
+
+3. From the workspace root, start both apps with `node scripts/dev.mjs`. Pro uses Stripe Checkout when Express has both Stripe settings and otherwise uses the local mock. Plus uses the mock in development. To opt in to Stripe for Pro when running Next.js separately, set `TUTORLAGBE_CHECKOUT_MODE=stripe` after configuring Express. Set `TUTORLAGBE_CHECKOUT_MODE=mock` to keep both plans in the local simulation.
+4. Sign in as a Free student or tutor and select Pro. Confirm the amount on Stripe and pay with test card `4242 4242 4242 4242`, a future expiry, and any three-digit CVC. Verify the result page, account plan, and paid entry under `/payment/history`. Repeat with the other role.
+5. Use Stripe's declined test card `4000 0000 0000 0002` to verify failed payment handling. Use Checkout's back link to verify the cancel page. An abandoned Checkout stays reusable until it expires. To test expiry, use `stripe checkout sessions expire cs_test_...` on an open test session from this app. Generic CLI fixtures lack this app's account metadata and are ignored for fulfillment.
+
+The webhook verifies signatures against the original request body, ignores live events, and retrieves the Checkout Session from Stripe. It verifies the account, role, amount, currency, payment mode, and payment status. One-time records are unique by Checkout Session ID. Payment confirmation and the account upgrade use a MongoDB transaction when supported. On a standalone server, a repeat delivery can finish an account update after the payment record was saved.
+
+For a new database using the assignment's `users` collection, set `TUTORLAGBE_USER_COLLECTION=users` for Express and Next.js before registering accounts. Existing installations default to Better Auth's `user` collection. To rename an existing collection, stop all app instances, back up the database, and use MongoDB's collection rename with destination replacement disabled. Set both apps to use `users` before restarting. Keeping the same account IDs preserves existing references.
+
+Existing Stripe test subscriptions can still be managed through the billing portal. If you have those subscriptions, also forward `invoice.paid` and the `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, and `customer.subscription.paused` events. New upgrades use one-time Checkout.

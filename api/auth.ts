@@ -11,10 +11,11 @@ interface AuthOptions {
     database: BetterAuthOptions['database'];
     baseURL: string;
     secret: string;
+    userCollection?: 'user' | 'users';
     google?: { clientId: string; clientSecret: string };
 }
 
-export function createAuth({ database, baseURL, secret, google }: AuthOptions) {
+export function createAuth({ database, baseURL, secret, google, userCollection }: AuthOptions) {
     return betterAuth({
         database,
         baseURL,
@@ -22,6 +23,7 @@ export function createAuth({ database, baseURL, secret, google }: AuthOptions) {
         telemetry: { enabled: false },
         emailAndPassword: { enabled: true, minPasswordLength: 8 },
         user: {
+            modelName: userCollection,
             additionalFields: {
                 role: { type: 'string', defaultValue: 'student', validator: { input: registrationRole } },
                 plan: { type: 'string', defaultValue: 'free', input: false },

@@ -103,7 +103,7 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, appli
 
     if (auth && billing) app.use('/api/payments', paymentRoutes(auth, billing));
     else app.use('/api/payments', (_request, response) => {
-        response.status(503).json({ error: 'Billing is temporarily unavailable.' });
+        response.status(503).json({ error: 'Stripe billing has not been configured on the server.', code: 'BILLING_NOT_CONFIGURED' });
     });
 
     if (auth) app.use('/api/uploads', uploadRoutes(auth, imageUploadKey));
