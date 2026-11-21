@@ -1,10 +1,7 @@
 import express, { type Express, type Request, type Response } from 'express';
 import 'dotenv/config'
 import { MongoClient } from 'mongodb';
-import uploadRoutes from './routes/upload.routes';
-
-const app: Express = express();
-const port = 8000;
+import uploadRoutes from './routes/upload.routes.js';
 
 const app: Express = express();
 const port = 8000;
@@ -39,3 +36,5 @@ await connectToMongoDB();
 app.listen(port, () => {
     console.log(`Example app listening on port ${port}`);
 });
+
+app.use("/api", uploadRoutes);

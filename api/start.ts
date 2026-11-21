@@ -5,6 +5,7 @@ import { MongoClient } from 'mongodb';
 import { createApi } from './app.ts';
 import type { Application } from './applications.ts';
 import { createAuth } from './auth.ts';
+import type { CatalogChange } from './catalog.ts';
 import { paymentStore } from './payment-store.ts';
 import type { BillingOptions } from './payments.ts';
 import { stripeGateway } from './stripe.ts';
@@ -96,6 +97,7 @@ function start() {
         imageUploadKey: process.env.IMGBB_API_KEY?.trim(),
         tuitions: data?.collection<Tuition>('tuitions'),
         applications: data?.collection<Application>('applications'),
+        catalog: data?.collection<CatalogChange>('catalog_changes'),
         checkDatabase: async () => {
             if (!clients.size) return false;
             await Promise.all([...clients.values()].map((client) => client.db('admin').command({ ping: 1 })));

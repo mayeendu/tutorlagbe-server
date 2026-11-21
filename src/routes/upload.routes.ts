@@ -1,6 +1,7 @@
 import { Router } from "express";
 import multer from "multer";
 
+
 const router = Router();
 
 const upload = multer({
@@ -10,7 +11,7 @@ const upload = multer({
 
 router.post(
     "/upload",
-    requireAuth, // Your existing auth middleware
+
     upload.single("image"),
     async (req, res) => {
         try {
@@ -52,7 +53,10 @@ router.post(
                 throw new Error("ImgBB upload failed");
             }
 
-            const result = await response.json();
+            const result = (await response.json()) as {
+                success?: boolean;
+                data?: { url?: string };
+            };
 
             if (!result.success || !result.data?.url) {
                 throw new Error("Invalid ImgBB response");

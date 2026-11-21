@@ -19,13 +19,13 @@ const account = {
     role: 'tutor',
 };
 
-async function startAuthApi(context, tuitions, applications, imageUploadKey) {
+async function startAuthApi(context, tuitions, applications, imageUploadKey, catalog) {
     const database = memoryAdapter({ user: [], session: [], account: [], verification: [], jwks: [] });
     const auth = createAuth({ database, baseURL: origin, secret });
     const app = express();
     app.get('/test/tutor', verifyToken(auth), verifyTutor, (_request, response) => response.sendStatus(204));
     app.get('/test/admin', verifyToken(auth), verifyAdmin, (_request, response) => response.sendStatus(204));
-    app.use(createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, tuitions, applications, imageUploadKey }));
+    app.use(createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, tuitions, applications, imageUploadKey, catalog }));
 
     const server = app.listen(0, '127.0.0.1');
     context.after(() => new Promise((resolve, reject) => {
@@ -487,4 +487,67 @@ test('authenticates and bounds uploads, identifies image signatures, and hides I
     const failure = await upload(makeFile(png));
     assert.equal(failure.status, 502);
     assert.deepEqual(await failure.json(), { error: 'Image hosting is temporarily unavailable. Try again.' });
+});
+
+test('catalog edits, images and deletes require a current admin role', async (context) => {
+    const rows = new Map();
+    const catalog = {
+        find: () => ({ toArray: async () => [...rows.values()] }),
+        async updateOne(filter, update, { upsert } = {}) {
+            const existing = rows.get(filter._id);
+            if (filter.deleted && existing?.deleted) {
+                if (upsert) throw new MongoServerError({ code: 11000, message: 'Duplicate key' });
+                return { matchedCount: 0 };
+            }
+            const row = existing ?? { _id: filter._id };
+            for (const [key, value] of Object.entries(update.$set)) {
+                if (key.startsWith('fields.')) (row.fields ??= {})[key.slice(7)] = value;
+                else row[key] = value;
+            }
+            if (update.$unset?.fields === '') delete row.fields;
+            rows.set(row._id, row);
+            return { matchedCount: Number(Boolean(existing)) };
+        },
+    };
+    const { auth, request } = await startAuthApi(context, undefined, undefined, undefined, catalog);
+    const student = await register(request, 'catalog-student@example.com', 'student');
+    const tutor = await register(request, 'catalog-tutor@example.com', 'tutor');
+    const admin = await register(request, 'catalog-admin@example.com', 'student');
+    const { adapter } = await auth.$context;
+    await adapter.update({ model: 'user', where: [{ field: 'id', value: admin.id }], update: { role: 'admin' } });
+
+    const base = '/api/catalog';
+    const course = base + '/courses/algebra-and-geometry-essentials';
+    const resource = base + '/resources/solving-linear-equations';
+    const patch = (path, token, body) => request(path, { method: 'PATCH', token, body });
+    const remove = (path, token) => request(path, { method: 'DELETE', token });
+    const image = { imageUrl: 'https://i.ibb.co/test/cover.webp' };
+    assert.equal((await patch(course, undefined, image)).status, 401);
+    assert.equal((await patch(course, student.token, image)).status, 403);
+    assert.equal((await patch(course, tutor.token, image)).status, 403);
+    assert.equal((await remove(resource, tutor.token)).status, 403);
+    assert.equal((await patch(course, admin.token, { imageUrl: 'https://example.com/cover.webp' })).status, 400);
+    assert.equal((await patch(course, admin.token, image)).status, 204);
+    assert.equal((await patch(course, admin.token, {
+        title: 'Updated course', topic: 'Math', classLevel: 'SSC', level: 'Beginner',
+        mode: 'Online', duration: '1 hour', fee: 500, description: 'Course description', outcomes: ['Practice skills'],
+    })).status, 204);
+    assert.equal((await patch(resource, student.token, image)).status, 403);
+    assert.equal((await patch(resource, admin.token, { imageUrl: 'https://example.com/cover.webp' })).status, 400);
+    assert.equal((await patch(resource, admin.token, image)).status, 204);
+    assert.equal((await patch(resource, admin.token, {
+        title: 'Updated resource', subject: 'Math', level: 'SSC', kind: 'Study notes',
+        summary: 'Resource summary', lesson: 'Lesson', practice: 'Question', answer: 'Answer',
+    })).status, 204);
+    const changes = await (await request(base)).json();
+    assert.equal(changes['courses/algebra-and-geometry-essentials'].fields.imageUrl, image.imageUrl);
+    assert.equal(changes['resources/solving-linear-equations'].fields.title, 'Updated resource');
+    assert.equal(changes['resources/solving-linear-equations'].fields.imageUrl, image.imageUrl);
+    assert.equal((await remove(resource, admin.token)).status, 204);
+    assert.equal((await remove(course, admin.token)).status, 204);
+    assert.equal((await patch(course, admin.token, image)).status, 404);
+    assert.deepEqual(await (await request(base)).json(), {
+        'courses/algebra-and-geometry-essentials': { deleted: true },
+        'resources/solving-linear-equations': { deleted: true },
+    });
 });

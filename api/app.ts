@@ -5,6 +5,7 @@ import type { Collection } from 'mongodb';
 import { verifyToken } from './access.ts';
 import { applicationRoutes, type Application } from './applications.ts';
 import type { TutorAuth } from './auth.ts';
+import { catalogRoutes, type CatalogChange } from './catalog.ts';
 import { paymentRoutes, type BillingOptions } from './payments.ts';
 import { getTeacher, listTeachers, profileRoutes } from './profiles.ts';
 import { tuitionRoutes, type Tuition } from './tuitions.ts';
@@ -16,11 +17,12 @@ interface ApiOptions {
     auth?: TutorAuth;
     tuitions?: Collection<Tuition>;
     applications?: Collection<Application>;
+    catalog?: Collection<CatalogChange>;
     billing?: BillingOptions;
     imageUploadKey?: string;
 }
 
-export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications, billing, imageUploadKey }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications, catalog, billing, imageUploadKey }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -83,6 +85,8 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, appli
             response.status(503).json({ error: 'The tuition service is temporarily unavailable.' });
         });
     }
+
+    if (catalog) app.use('/api/catalog', catalogRoutes(catalog, auth));
 
     app.get('/api/teachers', listTeachers(auth));
     app.get('/api/teachers/:id', getTeacher(auth));
