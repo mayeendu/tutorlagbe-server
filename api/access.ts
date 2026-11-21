@@ -3,7 +3,11 @@ import { z } from 'zod';
 
 import { accountRole, type AccountRole, type TutorAuth } from './auth.ts';
 
-const claimsSchema = z.object({ sub: z.string().min(1), sid: z.string().min(1) });
+const claimsSchema = z.object({
+    sub: z.string().min(1),
+    sid: z.string().min(1),
+    exp: z.number().finite().positive(),
+});
 const identitySchema = z.object({
     id: z.string(),
     name: z.string(),
@@ -64,14 +68,14 @@ export function verifyToken(auth: TutorAuth): RequestHandler {
     };
 }
 
-function requireRole(role: AccountRole): RequestHandler {
+function requireRoles(...roles: AccountRole[]): RequestHandler {
     return (_request, response, next) => {
         const identity = identitySchema.safeParse(response.locals.identity);
         if (!identity.success) {
-            response.status(401).json({ error: 'Authentication required' });
+            response.set('WWW-Authenticate', 'Bearer').status(401).json({ error: 'Authentication required' });
             return;
         }
-        if (identity.data.role !== role) {
+        if (!roles.includes(identity.data.role)) {
             response.status(403).json({ error: 'Access denied' });
             return;
         }
@@ -79,6 +83,7 @@ function requireRole(role: AccountRole): RequestHandler {
     };
 }
 
-export const verifyStudent = requireRole('student');
-export const verifyTutor = requireRole('tutor');
-export const verifyAdmin = requireRole('admin');
+export const verifyStudent = requireRoles('student');
+export const verifyTutor = requireRoles('tutor');
+export const verifyAdmin = requireRoles('admin');
+export const verifyTutorOrAdmin = requireRoles('tutor', 'admin');

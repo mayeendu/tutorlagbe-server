@@ -3,14 +3,14 @@ import { toNodeHandler } from 'better-auth/node';
 import type { Collection } from 'mongodb';
 
 import { verifyToken } from './access.ts';
-import { applicationRoutes, type Application } from './applications.ts';
+import { applicationRoutes, listTuitionReviews, type Application } from './applications.ts';
 import type { TutorAuth } from './auth.ts';
 import { catalogRoutes, type CatalogChange } from './catalog.ts';
 import { mockPaymentRoutes } from './mock-payments.ts';
 import type { PaymentStore } from './payment-store.ts';
 import { paymentRoutes, type BillingOptions } from './payments.ts';
 import { getTeacher, listTeachers, profileRoutes } from './profiles.ts';
-import { tuitionRoutes, type Tuition } from './tuitions.ts';
+import { tuitionRoutes, type SavedTuitionAccount, type Tuition } from './tuitions.ts';
 import { uploadRoutes } from './routes/upload.routes.ts';
 
 interface ApiOptions {
@@ -18,6 +18,7 @@ interface ApiOptions {
     checkDatabase: () => Promise<boolean>;
     auth?: TutorAuth;
     tuitions?: Collection<Tuition>;
+    savedTuitionAccounts?: Collection<SavedTuitionAccount>;
     applications?: Collection<Application>;
     catalog?: Collection<CatalogChange>;
     billing?: BillingOptions;
@@ -25,7 +26,7 @@ interface ApiOptions {
     imageUploadKey?: string;
 }
 
-export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications, catalog, billing, mockPayments, imageUploadKey }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, savedTuitionAccounts, applications, catalog, billing, mockPayments, imageUploadKey }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -81,8 +82,9 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, appli
         });
     }
 
+    if (applications && tuitions) app.get('/api/tuitions/:id/reviews', listTuitionReviews(applications, tuitions));
     if (tuitions) {
-        app.use('/api/tuitions', tuitionRoutes(tuitions, auth));
+        app.use('/api/tuitions', tuitionRoutes(tuitions, auth, savedTuitionAccounts));
     } else {
         app.use('/api/tuitions', (_request, response) => {
             response.status(503).json({ error: 'The tuition service is temporarily unavailable.' });

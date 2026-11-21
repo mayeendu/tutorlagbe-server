@@ -56,6 +56,10 @@ Use `GET /api/profiles/me` to read your own profile and `PATCH /api/profiles/me`
 - Students use `GET /api/applications/mine` to track their applications and `DELETE /api/applications/:id` to cancel a pending application. A cancelled application can be submitted again.
 - Teachers use `GET /api/applications/received` to see applications to their tuitions and `PATCH /api/applications/:id/status` to accept or reject a pending application. Application contact information is available only through the protected dashboards.
 
+Students can use `GET /api/tuitions/saved?page=1` to list their bookmarks. `GET`, `PUT`, and `DELETE /api/tuitions/saved/:id` check, save, and remove a bookmark. All four operations use the authenticated student account. Only approved, active tuitions can be saved or appear in the list.
+
+Students with an accepted application can submit one review through `POST /api/applications/:id/review` with an integer `rating` from 1 to 5 and written `feedback` up to 1,000 characters. `GET /api/tuitions/:id/reviews?page=1` lists reviews for approved, active tuitions without exposing the reviewer's account or application details.
+
 ## Stripe Pro Checkout in test mode
 
 Students pay $10 USD and tutors pay $15 USD once. Express derives the account, role, and price from the authenticated session. `POST /api/payments/create-checkout-session` returns a Stripe-hosted Checkout URL. `GET /api/payments/history` shows the signed-in account's attempts. The existing admin transactions view continues to show paid transactions.

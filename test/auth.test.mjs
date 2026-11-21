@@ -6,7 +6,7 @@ import { memoryAdapter } from 'better-auth/adapters/memory';
 import express from 'express';
 import { MongoServerError, ObjectId } from 'mongodb';
 
-import { verifyAdmin, verifyToken, verifyTutor } from '../api/access.ts';
+import { verifyAdmin, verifyStudent, verifyToken, verifyTutor } from '../api/access.ts';
 import { createApi } from '../api/app.ts';
 import { createAuth } from '../api/auth.ts';
 
@@ -19,13 +19,14 @@ const account = {
     role: 'tutor',
 };
 
-async function startAuthApi(context, tuitions, applications, imageUploadKey, catalog) {
+async function startAuthApi(context, tuitions, applications, imageUploadKey, catalog, savedTuitionAccounts) {
     const database = memoryAdapter({ user: [], session: [], account: [], verification: [], jwks: [] });
     const auth = createAuth({ database, baseURL: origin, secret });
     const app = express();
+    app.get('/test/student', verifyToken(auth), verifyStudent, (_request, response) => response.sendStatus(204));
     app.get('/test/tutor', verifyToken(auth), verifyTutor, (_request, response) => response.sendStatus(204));
     app.get('/test/admin', verifyToken(auth), verifyAdmin, (_request, response) => response.sendStatus(204));
-    app.use(createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, tuitions, applications, imageUploadKey, catalog }));
+    app.use(createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, tuitions, applications, imageUploadKey, catalog, savedTuitionAccounts }));
 
     const server = app.listen(0, '127.0.0.1');
     context.after(() => new Promise((resolve, reject) => {
@@ -83,13 +84,24 @@ test('signs up, restores the session, verifies JWTs and current roles, then revo
     });
 
     assert.equal((await request('/test/tutor', { token })).status, 204);
+    assert.equal((await request('/test/student', { token })).status, 403);
     assert.equal((await request('/test/admin', { token })).status, 403);
     const [header, , signature] = token.split('.');
     assert.equal((await request(identityPath, { token: `${header}.e30.${signature}` })).status, 401);
+    const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+    const { token: expired } = await auth.api.signJWT({
+        body: { payload: { ...claims, exp: Math.floor(Date.now() / 1000) - 60 } },
+    });
+    assert.equal((await request(identityPath, { token: expired })).status, 401);
+    const { token: wrongAudience } = await auth.api.signJWT({
+        body: { payload: { ...claims, aud: 'other-api' } },
+    });
+    assert.equal((await request(identityPath, { token: wrongAudience })).status, 401);
 
     const { adapter } = await auth.$context;
     await adapter.update({ model: 'user', where: [{ field: 'id', value: user.id }], update: { role: 'student' } });
     assert.equal((await request('/test/tutor', { token })).status, 403);
+    assert.equal((await request('/test/student', { token })).status, 204);
     assert.equal((await (await request(identityPath, { token })).json()).role, 'student');
 
     const signedOut = await request('/api/auth/sign-out', { cookie, body: {} });
@@ -122,6 +134,7 @@ function tuitionCollection(rows) {
             if (key === '$or') return value.some((part) => matches(row, part));
             if (value instanceof ObjectId) return row[key]?.equals(value);
             if (value instanceof RegExp) return value.test(row[key]);
+            if (value && '$in' in Object(value)) return value.$in.some((item) => item.equals(row[key]));
             if (value && '$exists' in Object(value)) return (key in row) === value.$exists;
             return row[key] === value;
         });
@@ -166,6 +179,85 @@ function tuitionCollection(rows) {
         },
     };
 }
+
+test('students save, list and remove only their own public tuition bookmarks', async (context) => {
+    const approved = { _id: new ObjectId(), title: 'Algebra', subject: 'Mathematics', approvalStatus: 'approved', isActive: true, createdAt: new Date() };
+    const pending = { ...approved, _id: new ObjectId(), approvalStatus: 'pending' };
+    const accounts = new Map();
+    const savedAccounts = {
+        async findOne(filter) {
+            const user = accounts.get(filter._id.$in.at(-1));
+            return user?.role === filter.role ? user : null;
+        },
+        async updateOne(filter, update) {
+            const user = await this.findOne(filter);
+            if (!user) return { matchedCount: 0 };
+            const add = update.$addToSet?.savedTuitionIds;
+            const remove = update.$pull?.savedTuitionIds;
+            user.savedTuitionIds ??= [];
+            if (add && !user.savedTuitionIds.some((id) => id.equals(add))) user.savedTuitionIds.push(add);
+            if (remove) user.savedTuitionIds = user.savedTuitionIds.filter((id) => !id.equals(remove));
+            return { matchedCount: 1 };
+        },
+    };
+    const { request } = await startAuthApi(context, tuitionCollection([approved, pending]), undefined, undefined, undefined, savedAccounts);
+    async function register(email, role) {
+        const response = await request('/api/auth/sign-up/email', { body: { ...account, email, role } });
+        assert.equal(response.status, 200);
+        const cookie = sessionCookie(response);
+        const { user } = await response.json();
+        accounts.set(user.id, user);
+        return (await (await request('/api/auth/token', { cookie })).json()).token;
+    }
+    const first = await register('bookmark-first@example.com', 'student');
+    const second = await register('bookmark-second@example.com', 'student');
+    const tutor = await register('bookmark-tutor@example.com', 'tutor');
+    const path = '/api/tuitions/saved';
+    const bookmark = `${path}/${approved._id}`;
+    assert.equal((await request(path)).status, 401);
+    assert.equal((await request(bookmark, { method: 'PUT', token: tutor })).status, 403);
+    assert.equal((await request(`${path}/${pending._id}`, { method: 'PUT', token: first })).status, 404);
+    assert.deepEqual(await (await request(bookmark, { token: first })).json(), { saved: false });
+
+    for (const result of await Promise.all([1, 2].map(() => request(bookmark, { method: 'PUT', token: first })))) {
+        assert.equal(result.status, 200);
+        assert.deepEqual(await result.json(), { saved: true });
+    }
+    const readSaved = async (token) => (await (await request(path, { token })).json()).items.map(({ id }) => id);
+    assert.deepEqual(await readSaved(first), [approved._id.toHexString()]);
+    assert.deepEqual(await readSaved(second), []);
+    await request(bookmark, { method: 'DELETE', token: second });
+    assert.deepEqual(await readSaved(first), [approved._id.toHexString()]);
+    approved.isActive = false;
+    assert.deepEqual(await readSaved(first), []);
+    assert.deepEqual(await (await request(bookmark, { method: 'DELETE', token: first })).json(), { saved: false });
+    assert.deepEqual(await (await request(bookmark, { token: first })).json(), { saved: false });
+});
+
+test('paginates filtered public tuitions and counts only approved active matches', async (context) => {
+    const rows = Array.from({ length: 25 }, (_, index) => ({
+        _id: new ObjectId(), title: `Algebra ${index + 1}`, subject: 'Mathematics',
+        mode: 'Online', approvalStatus: 'approved', isActive: true,
+        createdAt: new Date(2026, 0, 25 - index),
+    }));
+    rows.push(
+        { ...rows[0], _id: new ObjectId(), subject: 'Physics' },
+        { ...rows[0], _id: new ObjectId(), approvalStatus: 'pending' },
+        { ...rows[0], _id: new ObjectId(), isActive: false },
+    );
+    const { request } = await startAuthApi(context, tuitionCollection(rows));
+    const path = '/api/tuitions?subject=mathematics&mode=Online&page=';
+    const pages = await Promise.all([1, 2, 3, 4].map(async (page) => {
+        const response = await request(path + page);
+        assert.equal(response.status, 200);
+        return response.json();
+    }));
+    assert.deepEqual(pages.map(({ items }) => items.length), [12, 12, 1, 0]);
+    assert.deepEqual(pages.map(({ totalPages }) => totalPages), [3, 3, 3, 3]);
+    assert.deepEqual(pages.map(({ hasMore }) => hasMore), [true, true, false, false]);
+    assert.deepEqual(pages.flatMap(({ items }) => items.map(({ id }) => id)), rows.slice(0, 25).map(({ _id }) => _id.toHexString()));
+    assert.equal((await request(path + '0')).status, 400);
+});
 
 test('limits concurrent Free posts and only publishes tuitions approved by an admin', async (context) => {
     const rows = [];
@@ -420,7 +512,7 @@ test('lists only public tutor fields in the teacher directory', async (context) 
     assert.equal((await request(`/api/teachers/${student.id}`)).status, 404);
 });
 
-test('students apply once, track or cancel pending applications, and only the owning tutor can review', async (context) => {
+test('applications enforce ownership and accepted students can publish one tuition review', async (context) => {
     const listings = [];
     const rows = [];
     const applications = {
@@ -483,6 +575,15 @@ test('students apply once, track or cancel pending applications, and only the ow
 
     const review = (token, status, target = created.id) => request(base + '/' + target + '/status', { token, method: 'PATCH', body: { status } });
     const cancel = (token, target = created.id) => request(base + '/' + target, { token, method: 'DELETE' });
+    const feedback = { rating: 5, feedback: '  The practice exercises helped with my exams.  ' };
+    const leaveFeedback = (token, input = feedback, target = created.id) =>
+        request(base + '/' + target + '/review', { token, body: input });
+    const publicReviews = '/api/tuitions/' + body.tuitionId + '/reviews';
+    assert.equal((await leaveFeedback()).status, 401);
+    assert.equal((await leaveFeedback(tutor.token)).status, 403);
+    assert.equal((await leaveFeedback(student.token)).status, 403);
+    assert.equal((await leaveFeedback(anotherStudent.token)).status, 404);
+    assert.deepEqual(await (await request(publicReviews)).json(), { items: [], hasMore: false });
     assert.equal((await review(stranger.token, 'accepted')).status, 404);
     assert.equal((await cancel(anotherStudent.token)).status, 404);
     assert.equal((await cancel(tutor.token)).status, 403);
@@ -490,12 +591,29 @@ test('students apply once, track or cancel pending applications, and only the ow
     assert.equal((await review(tutor.token, 'rejected')).status, 409);
     assert.equal((await cancel(student.token)).status, 409);
     assert.equal((await (await request(base + '/mine', { token: student.token })).json()).items[0].status, 'accepted');
+    assert.equal((await leaveFeedback(student.token, { ...feedback, rating: 0 })).status, 400);
+    assert.equal((await leaveFeedback(student.token, { ...feedback, rating: 6 })).status, 400);
+    assert.equal((await leaveFeedback(student.token, { ...feedback, rating: 2.5 })).status, 400);
+    assert.equal((await leaveFeedback(student.token, { ...feedback, feedback: '   ' })).status, 400);
+    assert.equal((await leaveFeedback(student.token, { ...feedback, studentId: anotherStudent.id })).status, 400);
+    const submittedReviews = await Promise.all([leaveFeedback(student.token), leaveFeedback(student.token)]);
+    assert.deepEqual(submittedReviews.map(({ status }) => status).sort(), [201, 409]);
+    const postedReview = await submittedReviews.find(({ status }) => status === 201).json();
+    assert.equal(postedReview.rating, 5);
+    assert.equal(postedReview.feedback, feedback.feedback.trim());
+    assert.deepEqual(Object.keys(postedReview).sort(), ['createdAt', 'feedback', 'rating']);
+    assert.deepEqual((await acceptedCourses(student.token))[0].review, postedReview);
+    assert.deepEqual(await (await request(publicReviews)).json(), { items: [postedReview], hasMore: false });
+    listing.isActive = false;
+    assert.equal((await request(publicReviews)).status, 404);
+    listing.isActive = true;
 
     const second = await (await apply(anotherStudent.token)).json();
     assert.equal((await cancel(anotherStudent.token, second.id)).status, 204);
     assert.equal((await review(tutor.token, 'rejected', second.id)).status, 404);
     const reapplied = await (await apply(anotherStudent.token)).json();
     assert.equal((await review(tutor.token, 'rejected', reapplied.id)).status, 200);
+    assert.equal((await leaveFeedback(anotherStudent.token, feedback, reapplied.id)).status, 403);
     assert.equal((await (await request(base + '/mine', { token: anotherStudent.token })).json()).items[0].status, 'rejected');
     assert.deepEqual(await acceptedCourses(anotherStudent.token), []);
 

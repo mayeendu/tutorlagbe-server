@@ -2,7 +2,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import { MongoServerError, ObjectId, type Collection, type Filter } from 'mongodb';
 import { z } from 'zod';
 
-import { verifyAdmin, verifyToken, verifyTutor, type AuthIdentity } from './access.ts';
+import { verifyAdmin, verifyStudent, verifyToken, verifyTutor, verifyTutorOrAdmin, type AuthIdentity } from './access.ts';
 import type { TutorAuth } from './auth.ts';
 import { hostedImageUrl } from './routes/upload.routes.ts';
 
@@ -21,12 +21,13 @@ const input = z.object({
     path: ['location'], message: 'Enter a location for offline tuition',
 });
 
+const maxPage = 1000;
 const query = z.object({
     q: z.string().trim().max(100).optional(),
     subject: z.string().trim().max(60).optional(),
     classLevel: z.string().trim().max(40).optional(),
     mode: mode.optional(),
-    page: z.coerce.number().int().min(1).max(1000).default(1),
+    page: z.coerce.number().int().min(1).max(maxPage).default(1),
 });
 
 export { input as tuitionInput };
@@ -34,6 +35,7 @@ export { input as tuitionInput };
 const decision = z.object({ status: z.enum(['approved', 'rejected']), revision: z.number().int().positive().optional() });
 const idSchema = z.string().regex(/^[\da-f]{24}$/i);
 const publicFilter = { approvalStatus: 'approved', isActive: true } as const;
+const publicPageSize = 12;
 const pageSize = 24;
 
 export type Tuition = z.infer<typeof input> & {
@@ -46,6 +48,12 @@ export type Tuition = z.infer<typeof input> & {
     createdAt: Date;
     freePostingSlot?: number;
     revision?: number;
+};
+
+export type SavedTuitionAccount = {
+    _id: ObjectId | string;
+    role: string;
+    savedTuitionIds?: ObjectId[];
 };
 
 function listing(item: Tuition) {
@@ -66,7 +74,80 @@ function ownerFilter(user: AuthIdentity): Filter<Tuition> {
     return { tutorId: user.id };
 }
 
-export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth) {
+function savedTuitionRoutes(collection: Collection<Tuition>, accounts: Collection<SavedTuitionAccount>) {
+    const router = express.Router();
+    const accountFilter = ({ id }: AuthIdentity): Filter<SavedTuitionAccount> => ({
+        _id: { $in: idSchema.safeParse(id).success ? [new ObjectId(id), id] : [id] },
+        role: 'student',
+    });
+    const account = (identity: AuthIdentity) =>
+        accounts.findOne(accountFilter(identity), { projection: { savedTuitionIds: 1 } });
+
+    router.get('/', async (request, response) => {
+        const parsed = query.pick({ page: true }).safeParse(request.query);
+        if (!parsed.success) {
+            response.status(400).json({ error: 'Invalid saved tuitions page.' });
+            return;
+        }
+        const user = await account(response.locals.identity);
+        if (!user) {
+            response.status(403).json({ error: 'Access denied' });
+            return;
+        }
+        const { page } = parsed.data;
+        const ids = user.savedTuitionIds ?? [];
+        const rows = ids.length ? await collection.find({ ...publicFilter, _id: { $in: ids } })
+            .sort({ createdAt: -1, _id: -1 }).skip((page - 1) * publicPageSize).limit(publicPageSize + 1).toArray() : [];
+        response.json({ items: rows.slice(0, publicPageSize).map(listing), hasMore: rows.length > publicPageSize && page < maxPage });
+    });
+
+    router.param('id', (_request, response, next, value) => {
+        const id = idSchema.safeParse(value);
+        if (!id.success) {
+            response.status(404).json({ error: 'Tuition not found.' });
+            return;
+        }
+        response.locals.savedTuitionId = new ObjectId(id.data);
+        next();
+    });
+
+    router.get('/:id', async (_request, response) => {
+        const user = await account(response.locals.identity);
+        if (!user) {
+            response.status(403).json({ error: 'Access denied' });
+            return;
+        }
+        const id: ObjectId = response.locals.savedTuitionId;
+        response.json({ saved: user.savedTuitionIds?.some((saved) => saved.equals(id)) ?? false });
+    });
+
+    router.put('/:id', async (_request, response) => {
+        const id: ObjectId = response.locals.savedTuitionId;
+        if (!await collection.findOne({ _id: id, ...publicFilter }, { projection: { _id: 1 } })) {
+            response.status(404).json({ error: 'Tuition not found.' });
+            return;
+        }
+        const result = await accounts.updateOne(accountFilter(response.locals.identity), { $addToSet: { savedTuitionIds: id } });
+        if (result.matchedCount === 0) {
+            response.status(403).json({ error: 'Access denied' });
+            return;
+        }
+        response.json({ saved: true });
+    });
+
+    router.delete('/:id', async (_request, response) => {
+        const id: ObjectId = response.locals.savedTuitionId;
+        const result = await accounts.updateOne(accountFilter(response.locals.identity), { $pull: { savedTuitionIds: id } });
+        if (result.matchedCount === 0) {
+            response.status(403).json({ error: 'Access denied' });
+            return;
+        }
+        response.json({ saved: false });
+    });
+    return router;
+}
+
+export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth, savedAccounts?: Collection<SavedTuitionAccount>) {
     const router = express.Router();
     let slotIndex: Promise<string> | undefined;
 
@@ -87,24 +168,27 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
         if (classLevel) filter.classLevel = new RegExp(`^${literal(classLevel)}$`, 'i');
         if (mode) filter.mode = mode;
 
-        const rows = await collection.find(filter).sort({ createdAt: -1, _id: -1 })
-            .skip((page - 1) * pageSize).limit(pageSize + 1).toArray();
-        response.json({ items: rows.slice(0, pageSize).map(listing), hasMore: rows.length > pageSize && page < 1000 });
+        const [rows, total] = await Promise.all([
+            collection.find(filter).sort({ createdAt: -1, _id: -1 })
+                .skip((page - 1) * publicPageSize).limit(publicPageSize).toArray(),
+            collection.countDocuments(filter),
+        ]);
+        const totalPages = Math.min(maxPage, Math.max(1, Math.ceil(total / publicPageSize)));
+        response.json({ items: rows.map(listing), hasMore: page < totalPages, totalPages });
     });
+
+    if (auth && savedAccounts) {
+        router.use('/saved', verifyToken(auth), verifyStudent, savedTuitionRoutes(collection, savedAccounts));
+    } else {
+        router.use('/saved', (_request, response) => {
+            response.status(503).json({ error: 'Saved tuitions are temporarily unavailable.' });
+        });
+    }
 
     if (auth) {
         const authenticate = verifyToken(auth);
         const parseJson = express.json({ limit: '16kb' });
-        const verifyManager: express.RequestHandler = (_request, response, next) => {
-            const user: AuthIdentity = response.locals.identity;
-            if (user.role === 'student') {
-                response.status(403).json({ error: 'Access denied.' });
-                return;
-            }
-            next();
-        };
-
-        router.get('/manage', authenticate, verifyManager, async (request, response) => {
+        router.get('/manage', authenticate, verifyTutorOrAdmin, async (request, response) => {
             const page = query.pick({ page: true }).safeParse(request.query);
             if (!page.success) {
                 response.status(400).json({ error: 'Invalid page.' });
@@ -116,7 +200,7 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
         });
 
         const managed = express.Router({ mergeParams: true });
-        router.use('/manage/:id', authenticate, verifyManager, managed);
+        router.use('/manage/:id', authenticate, verifyTutorOrAdmin, managed);
         managed.use((request, response, next) => {
             const id = idSchema.safeParse(request.params.id);
             if (!id.success) {

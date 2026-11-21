@@ -10,7 +10,7 @@ import type { CatalogChange } from './catalog.ts';
 import { paymentStore } from './payment-store.ts';
 import type { BillingOptions } from './payments.ts';
 import { stripeGateway } from './stripe.ts';
-import type { Tuition } from './tuitions.ts';
+import type { SavedTuitionAccount, Tuition } from './tuitions.ts';
 
 function start() {
     config({ path: fileURLToPath(new URL('../.env', import.meta.url)), quiet: true });
@@ -123,6 +123,7 @@ function start() {
         mockPayments: store,
         imageUploadKey: process.env.IMGBB_API_KEY?.trim(),
         tuitions: data?.collection<Tuition>('tuitions'),
+        savedTuitionAccounts: authClient?.db('tutorlagbe_db').collection<SavedTuitionAccount>(userCollection),
         applications: data?.collection<Application>('applications'),
         catalog: data?.collection<CatalogChange>('catalog_changes'),
         checkDatabase: async () => {
