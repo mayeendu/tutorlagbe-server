@@ -39,7 +39,7 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, saved
         next();
     });
 
-    app.options(['/', '/readyz'], (request, response) => {
+    app.options(['/', '/health', '/readyz'], (request, response) => {
         const origin = request.get('Origin');
         const method = request.get('Access-Control-Request-Method');
         response.vary('Access-Control-Request-Method');
@@ -58,6 +58,10 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, saved
 
     app.get('/', (_request, response) => {
         response.send('Server is running successfully!');
+    });
+
+    app.get('/health', (_request, response) => {
+        response.set('Cache-Control', 'no-store').json({ status: 'ok', timestamp: new Date().toISOString() });
     });
 
     app.get('/readyz', async (_request, response) => {

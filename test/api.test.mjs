@@ -59,6 +59,13 @@ test('reports ready, returns JSON for unknown routes, and hides database errors'
     assert.equal(response.status, 503);
     assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.deepEqual(await response.json(), { ready: false });
+
+    const health = await fetch(`${unavailable}/health`);
+    assert.equal(health.status, 200);
+    assert.equal(health.headers.get('cache-control'), 'no-store');
+    const { status, timestamp } = await health.json();
+    assert.equal(status, 'ok');
+    assert.equal(new Date(timestamp).toISOString(), timestamp);
 });
 
 test('rejects invalid startup configuration without printing its value', () => {
