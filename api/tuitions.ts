@@ -151,6 +151,15 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth,
     const router = express.Router();
     let slotIndex: Promise<string> | undefined;
 
+    router.get('/filters', async (_request, response) => {
+        const [subjects, classLevels] = await Promise.all([
+            collection.distinct('subject', publicFilter),
+            collection.distinct('classLevel', publicFilter),
+        ]);
+        const collator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+        response.json({ subjects: subjects.sort(collator.compare), classLevels: classLevels.sort(collator.compare) });
+    });
+
     router.get('/', async (request, response) => {
         const filters = query.safeParse(request.query);
         if (!filters.success) {

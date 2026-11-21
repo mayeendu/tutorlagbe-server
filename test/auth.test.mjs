@@ -143,6 +143,7 @@ function tuitionCollection(rows) {
     return {
         async createIndex() { return 'unique_tutor_free_posting_slot'; },
         async countDocuments(filter) { return rows.filter((row) => matches(row, filter)).length; },
+        async distinct(field, filter) { return [...new Set(rows.filter((row) => matches(row, filter)).map((row) => row[field]))]; },
         async insertOne(row) {
             if ('freePostingSlot' in row && rows.some((other) => other.tutorId === row.tutorId && other.freePostingSlot === row.freePostingSlot)) {
                 throw new MongoServerError({ code: 11000, keyPattern: { tutorId: 1, freePostingSlot: 1 } });
@@ -237,12 +238,13 @@ test('students save, list and remove only their own public tuition bookmarks', a
 test('paginates filtered public tuitions and counts only approved active matches', async (context) => {
     const rows = Array.from({ length: 25 }, (_, index) => ({
         _id: new ObjectId(), title: `Algebra ${index + 1}`, subject: 'Mathematics',
+        classLevel: 'Class 10',
         mode: 'Online', approvalStatus: 'approved', isActive: true,
         createdAt: new Date(2026, 0, 25 - index),
     }));
     rows.push(
-        { ...rows[0], _id: new ObjectId(), subject: 'Physics' },
-        { ...rows[0], _id: new ObjectId(), approvalStatus: 'pending' },
+        { ...rows[0], _id: new ObjectId(), subject: 'Physics', classLevel: 'Class 9' },
+        { ...rows[0], _id: new ObjectId(), subject: 'Private draft', approvalStatus: 'pending' },
         { ...rows[0], _id: new ObjectId(), isActive: false },
     );
     const { request } = await startAuthApi(context, tuitionCollection(rows));
@@ -257,6 +259,9 @@ test('paginates filtered public tuitions and counts only approved active matches
     assert.deepEqual(pages.map(({ hasMore }) => hasMore), [true, true, false, false]);
     assert.deepEqual(pages.flatMap(({ items }) => items.map(({ id }) => id)), rows.slice(0, 25).map(({ _id }) => _id.toHexString()));
     assert.equal((await request(path + '0')).status, 400);
+    assert.deepEqual(await (await request('/api/tuitions/filters')).json(), {
+        subjects: ['Mathematics', 'Physics'], classLevels: ['Class 9', 'Class 10'],
+    });
 });
 
 test('limits concurrent Free posts and only publishes tuitions approved by an admin', async (context) => {
