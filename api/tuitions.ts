@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { verifyAdmin, verifyToken, verifyTutor, type AuthIdentity } from './access.ts';
 import type { TutorAuth } from './auth.ts';
+import { hostedImageUrl } from './routes/upload.routes.ts';
 
 const mode = z.enum(['Online', 'Offline']);
 const input = z.object({
@@ -15,6 +16,7 @@ const input = z.object({
     monthlyFee: z.number().int().min(0).max(1_000_000),
     daysPerWeek: z.number().int().min(1).max(7),
     description: z.string().trim().min(20).max(2000),
+    bannerImage: hostedImageUrl.optional(),
 }).refine((value) => value.mode === 'Online' || value.location.length > 0, {
     path: ['location'], message: 'Enter a location for offline tuition',
 });
@@ -46,9 +48,9 @@ export type Tuition = z.infer<typeof input> & {
 
 function listing(item: Tuition) {
     const { _id, title, subject, classLevel, mode, location, monthlyFee, daysPerWeek,
-        description, tutorName, createdAt } = item;
+        description, bannerImage, tutorName, createdAt } = item;
     return { id: _id.toHexString(), title, subject, classLevel, mode, location,
-        monthlyFee, daysPerWeek, description, tutorName, createdAt };
+        monthlyFee, daysPerWeek, description, bannerImage, tutorName, createdAt };
 }
 
 const literal = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -90,7 +92,7 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth)
 
     if (auth) {
         const authenticate = verifyToken(auth);
-        const parseJson = express.json({ limit: '8kb' });
+        const parseJson = express.json({ limit: '16kb' });
         const verifyManager: express.RequestHandler = (_request, response, next) => {
             const user: AuthIdentity = response.locals.identity;
             if (user.role === 'student') {

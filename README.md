@@ -14,6 +14,7 @@ When both repositories are in the TutorLagbe workspace, `node scripts/dev.mjs` f
 | `BETTER_AUTH_SECRET` | Server-only Better Auth secret of at least 32 characters. Reuse the existing auth secret for session continuity. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional Google provider settings. Supply both to enable it. |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Server-only Stripe API key and webhook signing secret. Supply both to enable billing. |
+| `IMGBB_API_KEY` | Server-only ImgBB key. Set it in the Express environment or local server `.env` to enable image uploads. |
 
 `GET /` reports HTTP liveness. `GET /readyz` returns `200` when all configured MongoDB connections answer a ping or `503` when a database is unavailable or unconfigured. Supply configuration through your shell or hosting platform and keep secret values out of version control.
 
@@ -26,6 +27,12 @@ When both repositories are in the TutorLagbe workspace, `node scripts/dev.mjs` f
 Auth keeps the existing `tutorlagbe_db` and Better Auth collection names for compatibility. Better Auth stores accounts, sessions, verification records, and JWT keys separately from application collections. A migration from `user` to the assignment's `users` collection still needs to be planned with existing data in mind.
 
 The API scripts use `api/start.ts` and `tsconfig.api.json`. The older files under `src/` are inactive scaffolding.
+
+`GET /api/teachers?page=1` returns public Tutor directory entries in pages of 24. Each entry includes the account ID, name, and any profile photo or bio.
+
+## Image uploads
+
+Send `POST /api/uploads` with a Better Auth bearer token and one multipart file in the `image` field. The server accepts JPEG, PNG, and WebP signatures up to 3 MB (3,145,728 bytes) and returns `201` with `{ "imageUrl": "https://i.ibb.co/..." }`. The client uploads through its same-origin proxy and uses that URL when saving a profile or tuition.
 
 ## Tuition publishing
 

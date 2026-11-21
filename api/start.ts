@@ -93,6 +93,7 @@ function start() {
         allowedOrigins,
         auth,
         billing,
+        imageUploadKey: process.env.IMGBB_API_KEY?.trim(),
         tuitions: data?.collection<Tuition>('tuitions'),
         applications: data?.collection<Application>('applications'),
         checkDatabase: async () => {

@@ -6,8 +6,9 @@ import { verifyToken } from './access.ts';
 import { applicationRoutes, type Application } from './applications.ts';
 import type { TutorAuth } from './auth.ts';
 import { paymentRoutes, type BillingOptions } from './payments.ts';
-import { profileRoutes } from './profiles.ts';
+import { getTeacher, listTeachers, profileRoutes } from './profiles.ts';
 import { tuitionRoutes, type Tuition } from './tuitions.ts';
+import { uploadRoutes } from './routes/upload.routes.ts';
 
 interface ApiOptions {
     allowedOrigins: ReadonlySet<string>;
@@ -16,9 +17,10 @@ interface ApiOptions {
     tuitions?: Collection<Tuition>;
     applications?: Collection<Application>;
     billing?: BillingOptions;
+    imageUploadKey?: string;
 }
 
-export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications, billing }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications, billing, imageUploadKey }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -82,6 +84,9 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, appli
         });
     }
 
+    app.get('/api/teachers', listTeachers(auth));
+    app.get('/api/teachers/:id', getTeacher(auth));
+
     if (auth) app.use('/api/profiles', profileRoutes(auth));
     else app.use('/api/profiles', (_request, response) => {
         response.status(503).json({ error: 'Profile management is temporarily unavailable.' });
@@ -95,6 +100,11 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, appli
     if (auth && billing) app.use('/api/payments', paymentRoutes(auth, billing));
     else app.use('/api/payments', (_request, response) => {
         response.status(503).json({ error: 'Billing is temporarily unavailable.' });
+    });
+
+    if (auth) app.use('/api/uploads', uploadRoutes(auth, imageUploadKey));
+    else app.post('/api/uploads', (_request, response) => {
+        response.status(503).json({ error: 'Image uploads are temporarily unavailable.' });
     });
 
     app.use((_request, response) => {

@@ -19,13 +19,13 @@ const account = {
     role: 'tutor',
 };
 
-async function startAuthApi(context, tuitions, applications) {
+async function startAuthApi(context, tuitions, applications, imageUploadKey) {
     const database = memoryAdapter({ user: [], session: [], account: [], verification: [], jwks: [] });
     const auth = createAuth({ database, baseURL: origin, secret });
     const app = express();
     app.get('/test/tutor', verifyToken(auth), verifyTutor, (_request, response) => response.sendStatus(204));
     app.get('/test/admin', verifyToken(auth), verifyAdmin, (_request, response) => response.sendStatus(204));
-    app.use(createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, tuitions, applications }));
+    app.use(createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, tuitions, applications, imageUploadKey }));
 
     const server = app.listen(0, '127.0.0.1');
     context.after(() => new Promise((resolve, reject) => {
@@ -39,11 +39,12 @@ async function startAuthApi(context, tuitions, applications) {
             const headers = new Headers({ Origin: origin });
             if (cookie) headers.set('Cookie', cookie);
             if (token) headers.set('Authorization', `Bearer ${token}`);
-            if (body) headers.set('Content-Type', 'application/json');
+            const multipart = body instanceof FormData;
+            if (body && !multipart) headers.set('Content-Type', 'application/json');
             return fetch(base + path, {
                 method,
                 headers,
-                body: body ? JSON.stringify(body) : undefined,
+                body: multipart ? body : body ? JSON.stringify(body) : undefined,
             });
         },
     };
@@ -238,8 +239,9 @@ test('enforces ownership for course edits and deletes and requires fresh moderat
 
     const course = { title: 'Course to edit', subject: 'Math', classLevel: 'Class 9', mode: 'Online',
         monthlyFee: 2000, daysPerWeek: 2, description: 'Guided lessons and weekly practice for students.' };
+    const bannerImage = 'https://i.ibb.co/example/tuition.png';
     const base = '/api/tuitions';
-    const created = await request(base, { token: tutor.token, body: course });
+    const created = await request(base, { token: tutor.token, body: { ...course, bannerImage } });
     assert.equal(created.status, 201);
     const { id } = await created.json();
     const managed = base + '/manage/' + id;
@@ -262,6 +264,7 @@ test('enforces ownership for course edits and deletes and requires fresh moderat
     assert.equal((await request(base + '/' + id)).status, 404);
     assert.equal((await decide()).status, 409);
     assert.equal((await decide(1)).status, 200);
+    assert.equal((await (await request(base + '/' + id)).json()).bannerImage, bannerImage);
     const adminEdit = await edit(admin.token, 'Admin edit');
     assert.equal(adminEdit.status, 200);
     assert.equal((await adminEdit.json()).approvalStatus, 'approved');
@@ -322,6 +325,26 @@ test('profiles support self edits and admin management without exposing auth fie
     assert.equal((await remove(profiles + '/me', admin.token)).status, 204);
     assert.equal((await request('/api/auth/identity', { token: admin.token })).status, 401);
     assert.equal((await request(profiles, { token: remaining.token })).status, 200);
+});
+
+test('lists only public tutor fields in the teacher directory', async (context) => {
+    const { request } = await startAuthApi(context);
+    const tutor = await register(request, 'directory-tutor@example.com', 'tutor');
+    const student = await register(request, 'directory-student@example.com', 'student');
+    const image = 'https://i.ibb.co/example/teacher.png';
+    assert.equal((await request('/api/profiles/me', { token: tutor.token, method: 'PATCH',
+        body: { name: 'Directory Tutor', bio: 'Science tutor', image, phone: '+880 12345' } })).status, 200);
+
+    const response = await request('/api/teachers');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { items: [{ id: tutor.id, name: 'Directory Tutor', image,
+        bio: 'Science tutor' }], hasMore: false });
+    assert.deepEqual(await (await request('/api/teachers?page=2')).json(), { items: [], hasMore: false });
+    assert.equal((await request('/api/teachers?page=0')).status, 400);
+    const detail = await request(`/api/teachers/${tutor.id}`);
+    assert.equal(detail.status, 200);
+    assert.deepEqual(await detail.json(), { id: tutor.id, name: 'Directory Tutor', image, bio: 'Science tutor' });
+    assert.equal((await request(`/api/teachers/${student.id}`)).status, 404);
 });
 
 test('students apply once, track or cancel pending applications, and only the owning tutor can review', async (context) => {
@@ -408,4 +431,60 @@ test('students apply once, track or cancel pending applications, and only the ow
         assert.equal(reviewed.status, 404);
         assert.equal(cancelled.status, 204);
     }
+});
+
+test('authenticates and bounds uploads, identifies image signatures, and hides ImgBB failures', async (context) => {
+    const { request } = await startAuthApi(context, undefined, undefined, 'integration-test-key');
+    const uploadPath = '/api/uploads';
+    const png = Buffer.from('89504e470d0a1a0a', 'hex');
+    const jpeg = Buffer.from('ffd8ffe0', 'hex');
+    const webp = Buffer.from('52494646040000005745425056503858', 'hex');
+    const makeFile = (bytes) => {
+        const body = new FormData();
+        body.set('image', new Blob([bytes], { type: 'image/png' }), 'example.png');
+        return body;
+    };
+
+    assert.equal((await request(uploadPath, { body: makeFile(png) })).status, 401);
+    const registered = await request('/api/auth/sign-up/email', { body: account });
+    assert.equal(registered.status, 200);
+    const issued = await request('/api/auth/token', { cookie: sessionCookie(registered) });
+    assert.equal(issued.status, 200);
+    const { token } = await issued.json();
+    const upload = (body) => request(uploadPath, { token, body, method: 'POST' });
+
+    const originalFetch = globalThis.fetch;
+    const providerCalls = [];
+    let providerFails = false;
+    context.mock.method(globalThis, 'fetch', async (target, options) => {
+        const url = new URL(target);
+        if (url.hostname !== 'api.imgbb.com') return originalFetch(target, options);
+
+        assert.equal(url.pathname, '/1/upload');
+        assert.equal(url.searchParams.get('key'), 'integration-test-key');
+        assert.equal(options.method, 'POST');
+        providerCalls.push(options.body.get('image').type);
+        return providerFails
+            ? Response.json({ error: 'private provider message' }, { status: 400 })
+            : Response.json({ success: true, data: { url: 'https://i.ibb.co/example/image.png' } });
+    });
+
+    assert.equal((await upload({ image: 'text' })).status, 415);
+    assert.equal((await upload(makeFile(Buffer.from('not an image')))).status, 415);
+    assert.equal((await upload(makeFile(Buffer.alloc(3 * 1024 * 1024 + 1)))).status, 413);
+    assert.deepEqual(providerCalls, []);
+
+    const atLimit = Buffer.alloc(3 * 1024 * 1024);
+    png.copy(atLimit);
+    for (const bytes of [atLimit, jpeg, webp]) {
+        const response = await upload(makeFile(bytes));
+        assert.equal(response.status, 201);
+        assert.deepEqual(await response.json(), { imageUrl: 'https://i.ibb.co/example/image.png' });
+    }
+    assert.deepEqual(providerCalls, ['image/png', 'image/jpeg', 'image/webp']);
+
+    providerFails = true;
+    const failure = await upload(makeFile(png));
+    assert.equal(failure.status, 502);
+    assert.deepEqual(await failure.json(), { error: 'Image hosting is temporarily unavailable. Try again.' });
 });

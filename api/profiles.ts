@@ -1,4 +1,4 @@
-import express, { type ErrorRequestHandler } from 'express';
+import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import { z } from 'zod';
 
 import { verifyAdmin, verifyToken, type AuthIdentity } from './access.ts';
@@ -16,9 +16,66 @@ const changes = z.strictObject({
 }).refine((value) => Object.keys(value).length > 0, 'Enter a profile change.');
 
 type Profile = AuthIdentity & { image?: string | null; phone?: string; bio?: string };
+type PublicTeacher = Pick<Profile, 'id' | 'name' | 'image' | 'bio'>;
+
+function publicTeacher({ id, name, image, bio }: PublicTeacher) {
+    return { id, name, image, bio };
+}
 
 function profile({ id, name, email, role, plan, image, phone, bio }: Profile) {
     return { id, name, email, role, plan, image, phone, bio };
+}
+
+export function listTeachers(auth?: TutorAuth): RequestHandler {
+    return async (request, response) => {
+        if (!auth) {
+            response.status(503).json({ error: 'The teacher directory is temporarily unavailable.' });
+            return;
+        }
+        const page = pageSchema.safeParse(request.query.page);
+        if (!page.success) {
+            response.status(400).json({ error: 'Invalid page.' });
+            return;
+        }
+        try {
+            const { adapter } = await auth.$context;
+            const rows = await adapter.findMany<PublicTeacher>({
+                model: 'user', where: [{ field: 'role', value: 'tutor' }],
+                limit: 25, offset: (page.data - 1) * 24, sortBy: { field: 'id', direction: 'asc' },
+            });
+            const items = rows.slice(0, 24).map(publicTeacher);
+            response.json({ items, hasMore: rows.length > 24 && page.data < 1000 });
+        } catch {
+            response.status(503).json({ error: 'The teacher directory is temporarily unavailable.' });
+        }
+    };
+}
+
+export function getTeacher(auth?: TutorAuth): RequestHandler {
+    return async (request, response) => {
+        if (!auth) {
+            response.status(503).json({ error: 'Teacher profiles are temporarily unavailable.' });
+            return;
+        }
+        const id = idSchema.safeParse(request.params.id);
+        if (!id.success) {
+            response.status(404).json({ error: 'Teacher not found.' });
+            return;
+        }
+        try {
+            const { adapter } = await auth.$context;
+            const row = await adapter.findOne<PublicTeacher>({
+                model: 'user', where: [{ field: 'id', value: id.data }, { field: 'role', value: 'tutor' }],
+            });
+            if (!row) {
+                response.status(404).json({ error: 'Teacher not found.' });
+                return;
+            }
+            response.json(publicTeacher(row));
+        } catch {
+            response.status(503).json({ error: 'Teacher profiles are temporarily unavailable.' });
+        }
+    };
 }
 
 export function profileRoutes(auth: TutorAuth) {
