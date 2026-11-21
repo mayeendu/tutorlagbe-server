@@ -5,6 +5,9 @@ import { MongoClient } from 'mongodb';
 import { createApi } from './app.ts';
 import type { Application } from './applications.ts';
 import { createAuth } from './auth.ts';
+import { paymentStore } from './payment-store.ts';
+import type { BillingOptions } from './payments.ts';
+import { stripeGateway } from './stripe.ts';
 import type { Tuition } from './tuitions.ts';
 
 function start() {
@@ -50,6 +53,7 @@ function start() {
     const secret = process.env.BETTER_AUTH_SECRET;
     const authUri = process.env.BETTER_AUTH_DB_URI?.trim();
     let auth: ReturnType<typeof createAuth> | undefined;
+    let authOrigin: string | undefined;
     if (secret || authUri || process.env.BETTER_AUTH_URL) {
         const url = URL.parse(process.env.BETTER_AUTH_URL ?? '');
         const validUrl = url && ['http:', 'https:'].includes(url.protocol) &&
@@ -62,9 +66,10 @@ function start() {
         const client = getClient(databaseUri, authUri ? 'BETTER_AUTH_DB_URI' : 'MONGODB_URI');
         const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
         const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+        authOrigin = url.origin;
         auth = createAuth({
             database: mongodbAdapter(client.db('tutorlagbe_db'), { client }),
-            baseURL: url.origin,
+            baseURL: authOrigin,
             secret,
             google: clientId && clientSecret ? { clientId, clientSecret } : undefined,
         });
@@ -72,9 +77,22 @@ function start() {
 
     const tuitionUri = mongoUri || authUri;
     const data = tuitionUri ? clients.get(tuitionUri)?.db('tutorlagbe_db') : undefined;
+    const stripeSecret = process.env.STRIPE_SECRET_KEY?.trim();
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
+    const billingUri = authUri || mongoUri;
+    const authClient = billingUri ? clients.get(billingUri) : undefined;
+    let billing: BillingOptions | undefined;
+    if (stripeSecret || webhookSecret) {
+        if (!stripeSecret || !webhookSecret || !authOrigin || !authClient) {
+            throw new Error('Configure STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and Express authentication to enable billing.');
+        }
+        billing = { origin: authOrigin, webhookSecret,
+            stripe: stripeGateway(stripeSecret), store: paymentStore(authClient, authClient.db('tutorlagbe_db')) };
+    }
     const app = createApi({
         allowedOrigins,
         auth,
+        billing,
         tuitions: data?.collection<Tuition>('tuitions'),
         applications: data?.collection<Application>('applications'),
         checkDatabase: async () => {
@@ -84,7 +102,8 @@ function start() {
         },
     });
 
-    const server = app.listen(port, () => console.info(`API listening on port ${port}`));
+    const host = process.env.TUTORLAGBE_API_HOST?.trim() || undefined;
+    const server = app.listen({ port, host }, () => console.info(`API listening on port ${port}`));
     server.on('error', (error: NodeJS.ErrnoException) => {
         console.error(`API could not listen on port ${port} (${error.code ?? 'unknown error'}).`);
         process.exitCode = 1;

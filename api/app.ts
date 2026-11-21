@@ -5,6 +5,7 @@ import type { Collection } from 'mongodb';
 import { verifyToken } from './access.ts';
 import { applicationRoutes, type Application } from './applications.ts';
 import type { TutorAuth } from './auth.ts';
+import { paymentRoutes, type BillingOptions } from './payments.ts';
 import { profileRoutes } from './profiles.ts';
 import { tuitionRoutes, type Tuition } from './tuitions.ts';
 
@@ -14,9 +15,10 @@ interface ApiOptions {
     auth?: TutorAuth;
     tuitions?: Collection<Tuition>;
     applications?: Collection<Application>;
+    billing?: BillingOptions;
 }
 
-export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, applications, billing }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -68,7 +70,7 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, appli
     } else {
         app.all('/api/auth/{*path}', (_request, response) => {
             response.set('Cache-Control', 'no-store').status(503)
-                .json({ message: 'Authentication is temporarily unavailable' });
+                .json({ message: 'Express authentication is not configured. Check the Better Auth settings and MongoDB connection.' });
         });
     }
 
@@ -88,6 +90,11 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, appli
     if (auth && applications && tuitions) app.use('/api/applications', applicationRoutes(auth, applications, tuitions));
     else app.use('/api/applications', (_request, response) => {
         response.status(503).json({ error: 'Applications are temporarily unavailable.' });
+    });
+
+    if (auth && billing) app.use('/api/payments', paymentRoutes(auth, billing));
+    else app.use('/api/payments', (_request, response) => {
+        response.status(503).json({ error: 'Billing is temporarily unavailable.' });
     });
 
     app.use((_request, response) => {
