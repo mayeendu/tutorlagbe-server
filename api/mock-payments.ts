@@ -8,6 +8,11 @@ import type { PaymentStore } from './payment-store.ts';
 
 const purchase = z.object({ plan: z.enum(['plus', 'pro']) }).strict();
 
+export function mockPaymentsEnabled() {
+    return process.env.ENABLE_MOCK_PAYMENTS === 'true' &&
+        process.env.NODE_ENV !== 'production' && process.env.VERCEL_ENV !== 'production';
+}
+
 export function mockPaymentRoutes(auth: TutorAuth, store: Pick<PaymentStore, 'mockCheckout'>) {
     const router = express.Router();
     router.post('/', verifyToken(auth), express.json({ limit: '2kb' }), async (request, response) => {

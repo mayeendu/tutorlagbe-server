@@ -49,12 +49,14 @@ test('mock payments require opt-in and authentication, use role prices and persi
         throw new MongoServerError({ code: 20, message: 'Transaction numbers are only allowed on a replica set member or mongos' });
     } };
     const mockPayments = paymentStore(client, db, 'users');
-    async function start(nodeEnv, flag) {
-        const previous = { NODE_ENV: process.env.NODE_ENV, ENABLE_MOCK_PAYMENTS: process.env.ENABLE_MOCK_PAYMENTS };
+    async function start(nodeEnv, flag, vercelEnv = 'development') {
+        const previous = { NODE_ENV: process.env.NODE_ENV, ENABLE_MOCK_PAYMENTS: process.env.ENABLE_MOCK_PAYMENTS,
+            VERCEL_ENV: process.env.VERCEL_ENV };
         let app;
         try {
             process.env.NODE_ENV = nodeEnv;
             process.env.ENABLE_MOCK_PAYMENTS = flag;
+            process.env.VERCEL_ENV = vercelEnv;
             app = createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth, mockPayments });
         } finally {
             for (const [name, value] of Object.entries(previous)) {
@@ -70,8 +72,9 @@ test('mock payments require opt-in and authentication, use role prices and persi
 
     const disabled = await start('development', 'false');
     const production = await start('production', 'true');
+    const vercelProduction = await start('development', 'true', 'production');
     const enabled = await start('development', 'true');
-    for (const base of [disabled, production]) {
+    for (const base of [disabled, production, vercelProduction]) {
         assert.equal((await fetch(base + '/api/payments/mock-checkout', { method: 'POST' })).status, 404);
         assert.equal((await (await fetch(base + '/api/payments/config')).json()).mockCheckout, false);
     }

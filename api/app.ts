@@ -6,7 +6,7 @@ import { verifyToken } from './access.ts';
 import { applicationRoutes, listTuitionReviews, type Application } from './applications.ts';
 import type { TutorAuth } from './auth.ts';
 import { catalogRoutes, type CatalogChange } from './catalog.ts';
-import { mockPaymentRoutes } from './mock-payments.ts';
+import { mockPaymentRoutes, mockPaymentsEnabled } from './mock-payments.ts';
 import type { PaymentStore } from './payment-store.ts';
 import { paymentRoutes, type BillingOptions } from './payments.ts';
 import { getTeacher, listTeachers, profileRoutes } from './profiles.ts';
@@ -110,7 +110,7 @@ export function createApi({ allowedOrigins, checkDatabase, auth, tuitions, saved
         response.status(503).json({ error: 'Applications are temporarily unavailable.' });
     });
 
-    const mockCheckout = process.env.NODE_ENV !== 'production' && process.env.ENABLE_MOCK_PAYMENTS === 'true';
+    const mockCheckout = mockPaymentsEnabled();
     app.get('/api/payments/config', (_request, response) => {
         response.set('Cache-Control', 'no-store').json({ stripeTestCheckout: Boolean(auth && billing),
             mockCheckout: Boolean(mockCheckout && auth && mockPayments) });

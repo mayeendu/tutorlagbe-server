@@ -7,6 +7,7 @@ import { createApi } from './app.ts';
 import type { Application } from './applications.ts';
 import { createAuth } from './auth.ts';
 import type { CatalogChange } from './catalog.ts';
+import { mockPaymentsEnabled } from './mock-payments.ts';
 import { paymentStore } from './payment-store.ts';
 import type { BillingOptions } from './payments.ts';
 import { stripeGateway } from './stripe.ts';
@@ -112,15 +113,17 @@ function start() {
         } else if (!/^(sk|rk|rkcs)_test_\w+$/.test(stripeSecret) || !/^whsec_\w+$/.test(webhookSecret)) {
             throw new Error('Stripe billing requires a test-mode API key and a webhook signing secret.');
         } else {
-            billing = { origin: authOrigin, webhookSecret,
-                stripe: stripeGateway(stripeSecret), store };
+            billing = {
+                origin: authOrigin, webhookSecret,
+                stripe: stripeGateway(stripeSecret), store
+            };
         }
     }
     const app = createApi({
         allowedOrigins,
         auth,
         billing,
-        mockPayments: store,
+        mockPayments: mockPaymentsEnabled() ? store : undefined,
         imageUploadKey: process.env.IMGBB_API_KEY?.trim(),
         tuitions: data?.collection<Tuition>('tuitions'),
         savedTuitionAccounts: authClient?.db('tutorlagbe_db').collection<SavedTuitionAccount>(userCollection),
@@ -133,7 +136,7 @@ function start() {
         },
     });
 
-    const host = process.env.TUTORLAGBE_API_HOST?.trim() || undefined;
+    const host = process.env.TUTORLAGBE_API_HOST?.trim() || '0.0.0.0';
     const server = app.listen({ port, host }, () => console.info(`API listening on port ${port}`));
     server.on('error', (error: NodeJS.ErrnoException) => {
         console.error(`API could not listen on port ${port} (${error.code ?? 'unknown error'}).`);
