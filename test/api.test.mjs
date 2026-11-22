@@ -114,6 +114,56 @@ test('rejects wildcard auth origins at startup', () => {
     assert.doesNotMatch(result.stderr, /\*\.vercel\.app/);
 });
 
+test('production entry points trust and grant CORS to the exact Kappa origin only', () => {
+    const script = `
+        import { once } from 'node:events';
+        const app = process.env.VERCEL_ENV
+            ? (await import('./app.ts')).default
+            : (await import('./api/runtime.ts')).createRuntime().app;
+        const server = app.listen(0, '127.0.0.1');
+        await once(server, 'listening');
+        try {
+            const endpoint = 'http://127.0.0.1:' + server.address().port + '/api/auth/sign-out';
+            for (const origin of ['https://tutorlagbe.example', 'https://tutor-lagbe-kappa.vercel.app', 'https://unrelated.vercel.app']) {
+                const response = await fetch(endpoint, { method: 'POST', headers: { Origin: origin, Cookie: 'test=1' } });
+                console.log(origin, response.status, response.headers.get('access-control-allow-origin'));
+            }
+        } finally {
+            server.close();
+        }
+    `;
+    for (const [environment, aliasStatus] of [['production', 200], ['', 200], ['preview', 403]]) {
+        const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+            env: { ...process.env, NODE_ENV: 'production', VERCEL_ENV: environment, CORS_ALLOWED_ORIGINS: '',
+                BETTER_AUTH_URL: 'https://tutorlagbe.example', BETTER_AUTH_TRUSTED_ORIGINS: '',
+                BETTER_AUTH_SECRET: 'isolated-vercel-test-secret-placeholder',
+                BETTER_AUTH_DB_URI: 'mongodb://127.0.0.1:27017', MONGODB_URI: '', TUTORLAGBE_USER_COLLECTION: 'user',
+                STRIPE_SECRET_KEY: '', STRIPE_WEBHOOK_SECRET: '' },
+            encoding: 'utf8', timeout: 10000,
+        });
+        assert.equal(result.status, 0, result.stderr);
+        assert.deepEqual(result.stdout.trim().split(/\r?\n/).filter((line) => line.startsWith('https://')), [
+            'https://tutorlagbe.example 200 null',
+            `https://tutor-lagbe-kappa.vercel.app ${aliasStatus} ${aliasStatus === 200 ? 'https://tutor-lagbe-kappa.vercel.app' : 'null'}`,
+            'https://unrelated.vercel.app 403 null',
+        ]);
+    }
+});
+
+test('rejects an insecure or wildcard production auth base URL', () => {
+    for (const baseURL of ['http://tutorlagbe.example', 'https://*.vercel.app']) {
+        const result = spawnSync(process.execPath, ['api/start.ts'], {
+            env: { ...process.env, NODE_ENV: 'production', BETTER_AUTH_URL: baseURL,
+                BETTER_AUTH_SECRET: 'isolated-production-test-secret-placeholder',
+                BETTER_AUTH_DB_URI: 'mongodb://127.0.0.1:27017', CORS_ALLOWED_ORIGINS: '', BETTER_AUTH_TRUSTED_ORIGINS: '' },
+            encoding: 'utf8', timeout: 5000,
+        });
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /BETTER_AUTH_URL \(the exact public frontend origin, HTTPS in production\)/);
+        assert.ok(!result.stderr.includes(baseURL));
+    }
+});
+
 test('rejects an unknown auth user collection instead of falling back to user', () => {
     const result = spawnSync(process.execPath, ['api/start.ts'], {
         env: { ...process.env, CORS_ALLOWED_ORIGINS: 'https://tutorlagbe.example',
@@ -148,5 +198,49 @@ test('reports disabled test billing without exposing settings', async (context) 
     assert.deepEqual(await config.json(), { stripeTestCheckout: false, mockCheckout: false });
     const checkout = await fetch(`${url}/api/payments/create-checkout-session`, { method: 'POST' });
     assert.equal(checkout.status, 503);
+    assert.equal(checkout.headers.get('cache-control'), 'no-store');
     assert.equal((await checkout.json()).code, 'BILLING_NOT_CONFIGURED');
+});
+
+test('production reports billing readiness safely and keeps the API up with invalid Stripe settings', () => {
+    const script = `
+        import assert from 'node:assert/strict';
+        import { once } from 'node:events';
+        import { createRuntime } from './api/runtime.ts';
+        for (const [key, signingSecret, ready] of [
+            ['sk_test_fixture_private', '', false],
+            ['sk_live_fixture_private', 'whsec_fixture_private', false],
+            ['sk_test_fixture_private', 'whsec_fixture_private', true],
+        ]) {
+            process.env.STRIPE_SECRET_KEY = key;
+            process.env.STRIPE_WEBHOOK_SECRET = signingSecret;
+            const runtime = createRuntime();
+            const server = runtime.app.listen(0, '127.0.0.1');
+            await once(server, 'listening');
+            try {
+                const base = 'http://127.0.0.1:' + server.address().port;
+                assert.equal((await fetch(base + '/health')).status, 200);
+                assert.deepEqual(await (await fetch(base + '/api/payments/config')).json(),
+                    { stripeTestCheckout: ready, mockCheckout: false });
+                const checkout = await fetch(base + '/api/payments/create-checkout-session', { method: 'POST' });
+                assert.equal(checkout.status, ready ? 401 : 503);
+            } finally {
+                await new Promise(resolve => server.close(resolve));
+                await runtime.close();
+            }
+        }
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+        env: { ...process.env, NODE_ENV: 'production', BETTER_AUTH_URL: 'https://tutorlagbe.example',
+            BETTER_AUTH_SECRET: 'isolated-billing-test-secret-placeholder',
+            BETTER_AUTH_DB_URI: 'mongodb://127.0.0.1:27017', MONGODB_URI: '', TUTORLAGBE_USER_COLLECTION: 'user',
+            CORS_ALLOWED_ORIGINS: '', BETTER_AUTH_TRUSTED_ORIGINS: '', ENABLE_MOCK_PAYMENTS: 'true' },
+        encoding: 'utf8', timeout: 15000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const logs = result.stdout + result.stderr;
+    assert.match(logs, /stripeWebhookSecretPresent: false/);
+    assert.match(logs, /testKeyValid: false/);
+    assert.match(logs, /billingReady: true/);
+    assert.doesNotMatch(logs, /fixture_private/);
 });

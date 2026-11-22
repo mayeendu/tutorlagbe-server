@@ -9,7 +9,7 @@ import { catalogRoutes, type CatalogChange } from './catalog.ts';
 import { databaseErrorDetails } from './database-error.ts';
 import { mockPaymentRoutes, mockPaymentsEnabled } from './mock-payments.ts';
 import type { PaymentStore } from './payment-store.ts';
-import { paymentRoutes, type BillingOptions } from './payments.ts';
+import { paymentReadRoutes, paymentRoutes, type BillingOptions } from './payments.ts';
 import { getTeacher, listTeachers, profileRoutes } from './profiles.ts';
 import { tuitionRoutes, type SavedTuitionAccount, type Tuition } from './tuitions.ts';
 import { uploadRoutes } from './routes/upload.routes.ts';
@@ -24,11 +24,12 @@ interface ApiOptions {
     applications?: Collection<Application>;
     catalog?: Collection<CatalogChange>;
     billing?: BillingOptions;
+    paymentStore?: Pick<PaymentStore, 'history' | 'latest' | 'user'>;
     mockPayments?: Pick<PaymentStore, 'mockCheckout'>;
     imageUploadKey?: string;
 }
 
-export function createApi({ allowedOrigins, checkDatabase, checkAuthDatabase, auth, tuitions, savedTuitionAccounts, applications, catalog, billing, mockPayments, imageUploadKey }: ApiOptions) {
+export function createApi({ allowedOrigins, checkDatabase, checkAuthDatabase, auth, tuitions, savedTuitionAccounts, applications, catalog, billing, paymentStore = billing?.store, mockPayments, imageUploadKey }: ApiOptions) {
     const app = express();
     app.disable('x-powered-by');
 
@@ -150,9 +151,18 @@ export function createApi({ allowedOrigins, checkDatabase, checkAuthDatabase, au
     else app.post('/api/payments/mock-checkout', (_request, response) => {
         response.set('Cache-Control', 'no-store').status(404).json({ error: 'Route not found' });
     });
+    app.use('/api/payments', (_request, response, next) => {
+        response.set('Cache-Control', 'no-store');
+        next();
+    });
+    if (auth && paymentStore) app.use('/api/payments', paymentReadRoutes(auth, paymentStore, Boolean(billing)));
+    else app.get(['/api/payments/history', '/api/payments/transactions'], (_request, response) => {
+        response.status(503).json({ code: 'PAYMENT_RECORDS_UNAVAILABLE', error: 'Payment records are temporarily unavailable.' });
+    });
     if (auth && billing) app.use('/api/payments', paymentRoutes(auth, billing));
     else app.use('/api/payments', (_request, response) => {
-        response.status(503).json({ error: 'Stripe billing has not been configured on the server.', code: 'BILLING_NOT_CONFIGURED' });
+        response.set('Cache-Control', 'no-store').status(503)
+            .json({ error: 'Stripe billing has not been configured on the server.', code: 'BILLING_NOT_CONFIGURED' });
     });
 
     if (auth) app.use('/api/uploads', uploadRoutes(auth, imageUploadKey));

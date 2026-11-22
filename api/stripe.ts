@@ -43,7 +43,10 @@ export function stripeGateway(secret: string) {
                 ...(key ? { 'Idempotency-Key': key } : {}) },
             body: form, redirect: 'error', signal: AbortSignal.timeout(8000),
         });
-        if (!response.ok) throw new Error('Stripe request failed.');
+        if (!response.ok) {
+            console.warn('Stripe API request failed.', { status: response.status });
+            throw new Error('Stripe request failed.');
+        }
         return schema.parse(await response.json());
     }
 

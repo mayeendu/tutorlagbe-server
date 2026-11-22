@@ -183,6 +183,10 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
     assert.equal((await postTuition()).status, 409);
     assert.equal((await checkout()).status, 401);
     assert.equal((await checkout(admin.token)).status, 403);
+    const plus = await call('/api/payments/create-checkout-session', { method: 'POST', token: student.token,
+        body: JSON.stringify({ plan: 'plus', currency: 'usd', amount: 1000 }) });
+    assert.equal(plus.status, 400);
+    assert.equal((await plus.json()).code, 'UNSUPPORTED_CHECKOUT_PLAN');
     assert.equal((await checkout(student.token)).status, 200);
     assert.equal((await checkout(tutor.token)).status, 200);
     assert.equal((await checkout(tutor.token)).status, 200);
@@ -267,6 +271,28 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
     assert.ok(history.items.every(item => item.userId === student.id));
     assert.equal((await call('/api/payments/transactions', { token: tutor.token })).status, 403);
     assert.equal((await (await call('/api/payments/transactions', { token: admin.token })).json()).items.length, 2);
+
+    const readOnlyApi = createApi({ allowedOrigins: new Set(), checkDatabase: async () => true, auth,
+        paymentStore: store }).listen(0, '127.0.0.1');
+    await once(readOnlyApi, 'listening');
+    context.after(() => new Promise(resolve => readOnlyApi.close(resolve)));
+    const withoutStripe = (path, token, method = 'GET') => fetch(
+        `http://127.0.0.1:${readOnlyApi.address().port}/api/payments/${path}`,
+        { method, headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    assert.equal((await withoutStripe('history')).status, 401);
+    assert.equal((await withoutStripe('history?page=0', student.token)).status, 400);
+    const ownHistory = await withoutStripe('history?userId=' + tutor.id, student.token);
+    assert.equal(ownHistory.status, 200);
+    assert.equal(ownHistory.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await ownHistory.json(), { ...history, canManageSubscription: false });
+    assert.equal((await withoutStripe('transactions', tutor.token)).status, 403);
+    assert.equal((await withoutStripe('transactions', admin.token)).status, 200);
+    for (const path of ['create-checkout-session', 'webhook']) {
+        const unavailable = await withoutStripe(path, student.token, 'POST');
+        assert.equal(unavailable.status, 503);
+        assert.equal((await unavailable.json()).code, 'BILLING_NOT_CONFIGURED');
+    }
 
     const legacy = await register('tutor', 'legacy');
     const legacyMetadata = { integration: 'tutorlagbe-pro', userId: legacy.id, role: 'tutor' };

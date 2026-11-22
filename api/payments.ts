@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { verifyAdmin, verifyToken, type AuthIdentity } from './access.ts';
 import type { TutorAuth } from './auth.ts';
+import { databaseErrorDetails } from './database-error.ts';
 import { handleCheckoutEvent, oneTimeCheckoutForm, pendingCheckout, proPrice } from './one-time-checkout.ts';
 import type { PaymentStore } from './payment-store.ts';
 import { stripeEventSchema, validStripeSignature, type StripeGateway } from './stripe.ts';
@@ -90,7 +91,11 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         response.json({ received: true });
     });
 
-    router.post(['/create-checkout-session', '/checkout'], authenticate, async (_request, response) => {
+    router.post(['/create-checkout-session', '/checkout'], authenticate, express.json({ limit: '8kb' }), async (request, response) => {
+        if (!z.object({ plan: z.literal('pro').optional() }).safeParse(request.body ?? {}).success) {
+            response.status(400).json({ code: 'UNSUPPORTED_CHECKOUT_PLAN', error: 'Stripe checkout is available for Pro only.' });
+            return;
+        }
         const identity: AuthIdentity = response.locals.identity;
         if (identity.role === 'admin') {
             response.status(403).json({ error: 'Pro is available to students and teachers.' });
@@ -179,6 +184,21 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         response.json({ url: stripeUrl(billing.url, 'billing.stripe.com') });
     });
 
+    const onError: ErrorRequestHandler = (error, request, response, next) => {
+        if (response.headersSent) return next(error);
+        if ([400, 413, 415].includes(error.status)) response.status(error.status).json({ error: 'Invalid Stripe request.' });
+        else {
+            console.warn('Stripe billing request failed.', { route: request.route?.path, ...databaseErrorDetails(error) });
+            response.status(503).json({ error: 'Billing is temporarily unavailable.' });
+        }
+    };
+    router.use(onError);
+    return router;
+}
+
+export function paymentReadRoutes(auth: TutorAuth, store: Pick<PaymentStore, 'history' | 'latest' | 'user'>, gatewayReady: boolean) {
+    const router = express.Router();
+    const authenticate = verifyToken(auth);
     router.get('/history', authenticate, async (request, response) => {
         const page = z.coerce.number().int().min(1).max(1000).default(1).safeParse(request.query.page);
         if (!page.success) {
@@ -186,7 +206,9 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
             return;
         }
         const id: string = response.locals.identity.id;
-        const [rows, user] = await Promise.all([store.history(id, (page.data - 1) * 24, 25), store.user(id)]);
+        const [rows, user] = await Promise.all([
+            store.history(id, (page.data - 1) * 24, 25), gatewayReady ? store.user(id) : undefined,
+        ]);
         response.json({ items: rows.slice(0, 24), hasMore: rows.length > 24 && page.data < 1000,
             canManageSubscription: Boolean(user?.stripeSubscriptionId) });
     });
@@ -201,10 +223,10 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         response.json({ items: rows.slice(0, 24), hasMore: rows.length > 24 && page.data < 1000 });
     });
 
-    const onError: ErrorRequestHandler = (error, _request, response, next) => {
+    const onError: ErrorRequestHandler = (error, request, response, next) => {
         if (response.headersSent) return next(error);
-        if ([400, 413, 415].includes(error.status)) response.status(error.status).json({ error: 'Invalid Stripe request.' });
-        else response.status(503).json({ error: 'Billing is temporarily unavailable.' });
+        console.warn('Payment records request failed.', { route: request.route?.path, ...databaseErrorDetails(error) });
+        response.status(503).json({ code: 'PAYMENT_RECORDS_UNAVAILABLE', error: 'Payment records are temporarily unavailable.' });
     };
     router.use(onError);
     return router;

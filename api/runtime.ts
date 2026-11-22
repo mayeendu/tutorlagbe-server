@@ -13,6 +13,8 @@ import type { BillingOptions } from './payments.ts';
 import { stripeGateway } from './stripe.ts';
 import type { SavedTuitionAccount, Tuition } from './tuitions.ts';
 
+const productionFrontendOrigin = 'https://tutor-lagbe-kappa.vercel.app';
+
 function exactOrigins(value: string, setting: string) {
     return new Set(value.split(',').map((entry) => entry.trim()).filter(Boolean).map((origin) => {
         const url = URL.parse(origin);
@@ -23,7 +25,7 @@ function exactOrigins(value: string, setting: string) {
     }));
 }
 
-export function createRuntime({ allowIncompleteBilling = false } = {}) {
+export function createRuntime() {
     if (process.env.npm_lifecycle_event === 'dev') process.env.NODE_ENV ??= 'development';
     config({ path: fileURLToPath(new URL('../.env', import.meta.url)), quiet: true });
 
@@ -41,11 +43,16 @@ export function createRuntime({ allowIncompleteBilling = false } = {}) {
         }
     }
 
-    const defaultOrigins = process.env.NODE_ENV === 'production'
+    const isProduction = process.env.NODE_ENV === 'production';
+    const defaultOrigins = isProduction
         ? ''
         : 'http://localhost:3000,http://127.0.0.1:3000';
     const allowedOrigins = exactOrigins(process.env.CORS_ALLOWED_ORIGINS ?? defaultOrigins, 'CORS_ALLOWED_ORIGINS');
     const trustedOrigins = exactOrigins(process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? '', 'BETTER_AUTH_TRUSTED_ORIGINS');
+    if (isProduction && (!process.env.VERCEL_ENV || process.env.VERCEL_ENV === 'production')) {
+        trustedOrigins.add(productionFrontendOrigin);
+        allowedOrigins.add(productionFrontendOrigin);
+    }
 
     const clients = new Map<string, MongoClient>();
     function getClient(uri: string, setting: string) {
@@ -76,18 +83,23 @@ export function createRuntime({ allowIncompleteBilling = false } = {}) {
     let auth: ReturnType<typeof createAuth> | undefined;
     let authOrigin: string | undefined;
     if (secret || authUri || process.env.BETTER_AUTH_URL) {
-        const url = URL.parse(process.env.BETTER_AUTH_URL ?? '');
-        const validUrl = url && ['http:', 'https:'].includes(url.protocol) &&
+        const url = URL.parse(process.env.BETTER_AUTH_URL?.trim() ?? '');
+        const validUrl = url && (url.protocol === 'https:' || (!isProduction && url.protocol === 'http:')) &&
+            !url.hostname.includes('*') &&
             url.pathname === '/' && !url.search && !url.hash && !url.username && !url.password;
         const databaseUri = authUri || mongoUri;
         if (!secret || secret.trim().length < 32 || !databaseUri || !validUrl) {
-            throw new Error('Configure BETTER_AUTH_SECRET (at least 32 characters), BETTER_AUTH_URL (the public origin), and BETTER_AUTH_DB_URI or MONGODB_URI.');
+            throw new Error('Configure BETTER_AUTH_SECRET (at least 32 characters), BETTER_AUTH_URL (the exact public frontend origin, HTTPS in production), and BETTER_AUTH_DB_URI or MONGODB_URI.');
         }
 
         const client = getClient(databaseUri, authUri ? 'BETTER_AUTH_DB_URI' : 'MONGODB_URI');
         if (process.env.NODE_ENV === 'production') {
             console.info('Better Auth storage configured.', {
                 database: 'tutorlagbe_db', userCollection, uriSetting: authUri ? 'BETTER_AUTH_DB_URI' : 'MONGODB_URI',
+            });
+            console.info('Better Auth origins configured.', {
+                frontendOrigin: url.origin,
+                trustedOrigins: [...trustedOrigins],
             });
         }
         const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
@@ -111,24 +123,29 @@ export function createRuntime({ allowIncompleteBilling = false } = {}) {
     const authClient = billingUri ? clients.get(billingUri) : undefined;
     const store = authClient ? paymentStore(authClient, authClient.db('tutorlagbe_db'), userCollection) : undefined;
     let billing: BillingOptions | undefined;
-    if (stripeSecret || webhookSecret) {
-        if (!stripeSecret || !webhookSecret || !authOrigin || !store) {
-            const message = 'Configure STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and Express authentication to enable billing.';
-            if (process.env.NODE_ENV === 'production' && !allowIncompleteBilling) throw new Error(message);
-            console.warn(message);
-        } else if (!/^(sk|rk|rkcs)_test_\w+$/.test(stripeSecret) || !/^whsec_\w+$/.test(webhookSecret)) {
-            throw new Error('Stripe billing requires a test-mode API key and a webhook signing secret.');
-        } else {
-            billing = {
-                origin: authOrigin, webhookSecret,
-                stripe: stripeGateway(stripeSecret), store
-            };
-        }
+    const testKeyValid = /^(sk|rk|rkcs)_test_\w+$/.test(stripeSecret ?? '');
+    const webhookSecretValid = /^whsec_\w+$/.test(webhookSecret ?? '');
+    if (auth && authOrigin && store && stripeSecret && webhookSecret && testKeyValid && webhookSecretValid) {
+        billing = { origin: authOrigin, webhookSecret, stripe: stripeGateway(stripeSecret), store };
+    }
+    if (isProduction || stripeSecret || webhookSecret) {
+        const log = billing ? console.info : console.warn;
+        log('Stripe test billing configuration.', {
+            stripeSecretKeyPresent: Boolean(stripeSecret),
+            stripeWebhookSecretPresent: Boolean(webhookSecret),
+            testKeyValid,
+            webhookSecretValid,
+            authOriginConfigured: Boolean(authOrigin),
+            paymentStoreConfigured: Boolean(store),
+            paymentStoreUriSetting: authUri ? 'BETTER_AUTH_DB_URI' : mongoUri ? 'MONGODB_URI' : undefined,
+            billingReady: Boolean(billing),
+        });
     }
     const app = createApi({
         allowedOrigins,
         auth,
         billing,
+        paymentStore: store,
         mockPayments: mockPaymentsEnabled() ? store : undefined,
         imageUploadKey: process.env.IMGBB_API_KEY?.trim(),
         tuitions: data?.collection<Tuition>('tuitions'),
