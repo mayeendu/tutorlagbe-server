@@ -148,7 +148,8 @@ function savedTuitionRoutes(collection: Collection<Tuition>, accounts: Collectio
     return router;
 }
 
-export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth, savedAccounts?: Collection<SavedTuitionAccount>) {
+export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth, savedAccounts?: Collection<SavedTuitionAccount>,
+    demoEntitlement?: (id: string, role: 'tutor') => Promise<{ plan: 'plus' | 'pro' } | null>) {
     const router = express.Router();
     let slotIndex: Promise<string> | undefined;
 
@@ -271,7 +272,7 @@ export function tuitionRoutes(collection: Collection<Tuition>, auth?: TutorAuth,
                 tutorEmail: tutor.email, approvalStatus: 'pending', isActive: true, createdAt: new Date(),
             };
 
-            if (tutor.plan === 'pro') {
+            if (tutor.plan === 'pro' || (await demoEntitlement?.(tutor.id, 'tutor'))?.plan === 'pro') {
                 await collection.insertOne(item);
                 response.status(201).json({ ...listing(item), approvalStatus: item.approvalStatus });
                 return;

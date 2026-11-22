@@ -114,7 +114,7 @@ test('rejects wildcard auth origins at startup', () => {
     assert.doesNotMatch(result.stderr, /\*\.vercel\.app/);
 });
 
-test('production entry points trust and grant CORS to the exact Kappa origin only', () => {
+test('production entry points honor the exact configured frontend origins', () => {
     const script = `
         import { once } from 'node:events';
         const app = process.env.VERCEL_ENV
@@ -124,7 +124,8 @@ test('production entry points trust and grant CORS to the exact Kappa origin onl
         await once(server, 'listening');
         try {
             const endpoint = 'http://127.0.0.1:' + server.address().port + '/api/auth/sign-out';
-            for (const origin of ['https://tutorlagbe.example', 'https://tutor-lagbe-kappa.vercel.app', 'https://unrelated.vercel.app']) {
+            for (const origin of ['https://tutorlagbe.example', 'https://tutorlagbe-client.vercel.app',
+                'https://tutor-lagbe-kappa.vercel.app', 'https://unrelated.vercel.app']) {
                 const response = await fetch(endpoint, { method: 'POST', headers: { Origin: origin, Cookie: 'test=1' } });
                 console.log(origin, response.status, response.headers.get('access-control-allow-origin'));
             }
@@ -132,10 +133,10 @@ test('production entry points trust and grant CORS to the exact Kappa origin onl
             server.close();
         }
     `;
-    for (const [environment, aliasStatus] of [['production', 200], ['', 200], ['preview', 403]]) {
+    for (const environment of ['production', '', 'preview']) {
         const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-            env: { ...process.env, NODE_ENV: 'production', VERCEL_ENV: environment, CORS_ALLOWED_ORIGINS: '',
-                BETTER_AUTH_URL: 'https://tutorlagbe.example', BETTER_AUTH_TRUSTED_ORIGINS: '',
+            env: { ...process.env, NODE_ENV: 'production', VERCEL_ENV: environment, CORS_ALLOWED_ORIGINS: 'https://tutorlagbe-client.vercel.app',
+                BETTER_AUTH_URL: 'https://tutorlagbe.example', BETTER_AUTH_TRUSTED_ORIGINS: 'https://tutorlagbe-client.vercel.app',
                 BETTER_AUTH_SECRET: 'isolated-vercel-test-secret-placeholder',
                 BETTER_AUTH_DB_URI: 'mongodb://127.0.0.1:27017', MONGODB_URI: '', TUTORLAGBE_USER_COLLECTION: 'user',
                 STRIPE_SECRET_KEY: '', STRIPE_WEBHOOK_SECRET: '' },
@@ -144,14 +145,15 @@ test('production entry points trust and grant CORS to the exact Kappa origin onl
         assert.equal(result.status, 0, result.stderr);
         assert.deepEqual(result.stdout.trim().split(/\r?\n/).filter((line) => line.startsWith('https://')), [
             'https://tutorlagbe.example 200 null',
-            `https://tutor-lagbe-kappa.vercel.app ${aliasStatus} ${aliasStatus === 200 ? 'https://tutor-lagbe-kappa.vercel.app' : 'null'}`,
+            'https://tutorlagbe-client.vercel.app 200 https://tutorlagbe-client.vercel.app',
+            'https://tutor-lagbe-kappa.vercel.app 403 null',
             'https://unrelated.vercel.app 403 null',
         ]);
     }
 });
 
-test('rejects an insecure or wildcard production auth base URL', () => {
-    for (const baseURL of ['http://tutorlagbe.example', 'https://*.vercel.app']) {
+test('rejects a wildcard or non-HTTP production auth base URL', () => {
+    for (const baseURL of ['ftp://tutorlagbe.example', 'https://*.vercel.app']) {
         const result = spawnSync(process.execPath, ['api/start.ts'], {
             env: { ...process.env, NODE_ENV: 'production', BETTER_AUTH_URL: baseURL,
                 BETTER_AUTH_SECRET: 'isolated-production-test-secret-placeholder',
@@ -159,7 +161,7 @@ test('rejects an insecure or wildcard production auth base URL', () => {
             encoding: 'utf8', timeout: 5000,
         });
         assert.equal(result.status, 1);
-        assert.match(result.stderr, /BETTER_AUTH_URL \(the exact public frontend origin, HTTPS in production\)/);
+        assert.match(result.stderr, /BETTER_AUTH_URL \(the exact public origin\)/);
         assert.ok(!result.stderr.includes(baseURL));
     }
 });
@@ -195,7 +197,7 @@ test('reports disabled test billing without exposing settings', async (context) 
     const config = await fetch(`${url}/api/payments/config`);
     assert.equal(config.status, 200);
     assert.equal(config.headers.get('cache-control'), 'no-store');
-    assert.deepEqual(await config.json(), { stripeTestCheckout: false, mockCheckout: false });
+    assert.deepEqual(await config.json(), { stripeTestCheckout: false, stripeCheckoutPlans: [], mockCheckout: false });
     const checkout = await fetch(`${url}/api/payments/create-checkout-session`, { method: 'POST' });
     assert.equal(checkout.status, 503);
     assert.equal(checkout.headers.get('cache-control'), 'no-store');
@@ -207,13 +209,16 @@ test('production reports billing readiness safely and keeps the API up with inva
         import assert from 'node:assert/strict';
         import { once } from 'node:events';
         import { createRuntime } from './api/runtime.ts';
-        for (const [key, signingSecret, ready] of [
+        for (const [key, signingSecret, ready, demo = false] of [
             ['sk_test_fixture_private', '', false],
             ['sk_live_fixture_private', 'whsec_fixture_private', false],
             ['sk_test_fixture_private', 'whsec_fixture_private', true],
+            ['sk_test_fixture_private', 'whsec_fixture_private', true, true],
         ]) {
             process.env.STRIPE_SECRET_KEY = key;
             process.env.STRIPE_WEBHOOK_SECRET = signingSecret;
+            process.env.ENABLE_DEMO_DEPLOYMENT = String(demo);
+            process.env.DEMO_FRONTEND_ORIGIN = 'https://tutorlagbe.example';
             const runtime = createRuntime();
             const server = runtime.app.listen(0, '127.0.0.1');
             await once(server, 'listening');
@@ -221,9 +226,12 @@ test('production reports billing readiness safely and keeps the API up with inva
                 const base = 'http://127.0.0.1:' + server.address().port;
                 assert.equal((await fetch(base + '/health')).status, 200);
                 assert.deepEqual(await (await fetch(base + '/api/payments/config')).json(),
-                    { stripeTestCheckout: ready, mockCheckout: false });
+                    { stripeTestCheckout: ready, stripeCheckoutPlans: ready ? ['plus', 'pro'] : [], mockCheckout: false });
                 const checkout = await fetch(base + '/api/payments/create-checkout-session', { method: 'POST' });
                 assert.equal(checkout.status, ready ? 401 : 503);
+                const catalog = await fetch(base + '/api/tuitions?page=invalid');
+                assert.equal(catalog.status, 400);
+                assert.deepEqual(await catalog.json(), { error: 'Invalid tuition filters.' });
             } finally {
                 await new Promise(resolve => server.close(resolve));
                 await runtime.close();

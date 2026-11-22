@@ -33,7 +33,7 @@ test('standalone MongoDB fulfillment can resume after the payment write', async 
     const now = new Date();
     const payment = {
         _id: 'cs_test_retry', kind: 'one-time', status: 'pending', stripeSessionId: 'cs_test_retry',
-        userId: 'buyer', userRole: 'student', amount: 1000, currency: 'usd', createdAt: now, updatedAt: now,
+        userId: 'buyer', userRole: 'student', amount: 1000, currency: 'usd', planName: 'Pro', createdAt: now, updatedAt: now,
     };
     const user = { _id: 'buyer', role: 'student', plan: 'free' };
     let accountWrites = 0;
@@ -77,7 +77,7 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
         user: async id => users.get(id),
         async reserve(id, previous, attempt) {
             const user = users.get(id);
-            if (user.plan !== 'free' || user.stripeCheckout?.key !== previous) return false;
+            if (user.plan === 'pro' || user.plan === attempt.plan || user.stripeCheckout?.key !== previous) return false;
             user.stripeCheckout = attempt;
             return true;
         },
@@ -109,15 +109,22 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
             if (payments.get(payment._id).status !== 'paid') payments.set(payment._id, payment);
             if (payment.status !== 'paid') return;
             const user = users.get(payment.userId);
-            user.proPaymentSessionId = payment.stripeSessionId;
-            user.plan = 'pro';
-            await adapter.update({ model: 'user', where: [{ field: 'id', value: payment.userId }], update: { plan: 'pro' } });
+            if (payment.planName === 'Plus') {
+                user.plusPaymentSessionId ??= payment.stripeSessionId;
+                if (user.plan !== 'pro') user.plan = 'plus';
+            } else {
+                user.proPaymentSessionId ??= payment.stripeSessionId;
+                user.plan = 'pro';
+            }
+            await adapter.update({ model: 'user', where: [{ field: 'id', value: payment.userId }], update: { plan: user.plan } });
         },
         latest: async () => [...payments.values()].filter(payment => payment.status === 'paid' || payment.paymentStatus === 'paid'),
         history: async (userId) => [...payments.values()].filter(payment => payment.userId === userId),
     };
+    let failCheckout = false;
     const stripe = {
         async createCheckout(form, key) {
+            if (failCheckout) throw new Error('Simulated Stripe outage');
             requests.push({ form, key });
             const role = form.get('metadata[role]');
             const id = `cs_test_${role}_${requests.length}`;
@@ -126,11 +133,13 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
                 amount_total: Number(form.get('line_items[0][price_data][unit_amount]')),
                 client_reference_id: form.get('client_reference_id'),
                 metadata: { integration: form.get('metadata[integration]'), userId: form.get('metadata[userId]'),
-                    attempt: form.get('metadata[attempt]'), role } };
+                    attempt: form.get('metadata[attempt]'), role,
+                    ...(form.has('metadata[plan]') ? { plan: form.get('metadata[plan]') } : {}) } };
             checkouts.set(id, session);
             return session;
         },
         checkout: async id => checkouts.get(id),
+        expireCheckout: async id => Object.assign(checkouts.get(id), { status: 'expired', url: null }),
         checkoutForSubscription: async id => [...checkouts.values()].find(item => item.subscription === id),
         subscription: async id => subscriptions.get(id),
         invoice: async id => invoices.get(id),
@@ -172,9 +181,10 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
         return call('/api/payments/webhook', { method: 'POST', body, signature: valid ? sign(body) : 'invalid' });
     };
     const student = await register('student'), tutor = await register('tutor'), admin = await register('admin');
-    assert.deepEqual(await (await call('/api/payments/config')).json(), { stripeTestCheckout: true, mockCheckout: false });
-    const checkout = token => call('/api/payments/create-checkout-session', { method: 'POST', token,
-        body: JSON.stringify({ amount: 1, role: 'admin', userId: admin.id }) });
+    assert.deepEqual(await (await call('/api/payments/config')).json(),
+        { stripeTestCheckout: true, stripeCheckoutPlans: ['plus', 'pro'], mockCheckout: false });
+    const checkout = (token, selected) => call('/api/payments/create-checkout-session', { method: 'POST', token,
+        body: selected ? JSON.stringify({ plan: selected }) : undefined });
     const postTuition = () => call('/api/tuitions', { method: 'POST', token: tutor.token,
         body: JSON.stringify({ title: 'Algebra tuition', subject: 'Math', classLevel: 'Class 9', mode: 'Online',
             monthlyFee: 2000, daysPerWeek: 2, description: 'Guided algebra tuition and weekly practice.' }) });
@@ -198,6 +208,9 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
     assert.ok(requests[1].key.startsWith('tutorlagbe-pro-once-'));
     const tutorSession = checkouts.get('cs_test_tutor_2');
     const studentSession = checkouts.get('cs_test_student_1');
+    // Previously created Pro attempts and Stripe sessions omit the plan claim.
+    delete tutorSession.metadata.plan;
+    delete users.get(tutor.id).stripeCheckout.plan;
     const status = (id, token) => call('/api/payments/status/' + id, { token });
     const statusValue = async (id, token) => (await (await status(id, token)).json()).status;
     const plan = async (token) => (await (await call('/api/auth/identity', { token })).json()).plan;
@@ -228,6 +241,9 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
     assert.equal((await event('checkout.session.async_payment_succeeded', tutorSession.id)).status, 200);
     assert.equal(await plan(tutor.token), 'free');
     users.get(tutor.id).role = 'tutor';
+    // Simulate the webhook arriving before the checkout request saves its pending payment.
+    payments.delete(tutorSession.id);
+    delete users.get(tutor.id).stripeCheckout.sessionId;
     const deliver = () => event('checkout.session.async_payment_succeeded', tutorSession.id, { eventId: 'evt_tutor_success' });
     for (const response of await Promise.all([deliver(), deliver()])) assert.equal(response.status, 200);
     const payment = payments.get(tutorSession.id);
@@ -307,4 +323,43 @@ test('Stripe test Checkout protects role prices, verifies payment outcomes and p
     subscription.status = 'canceled';
     assert.equal((await event('customer.subscription.deleted', subscription.id)).status, 200);
     assert.equal(users.get(legacy.id).plan, 'free');
+
+    const plusTutor = await register('tutor', 'plus-tutor');
+    assert.equal((await checkout(plusTutor.token, 'pro')).status, 200);
+    const openPro = checkouts.get(users.get(plusTutor.id).stripeCheckout.sessionId);
+    failCheckout = true;
+    const unavailablePlus = await checkout(plusTutor.token, 'plus');
+    assert.equal(unavailablePlus.status, 503);
+    assert.deepEqual(await unavailablePlus.json(), {
+        code: 'CHECKOUT_UNAVAILABLE', error: 'Could not open Stripe Test Checkout. Try again shortly.',
+    });
+    failCheckout = false;
+    const purchasePlus = await checkout(plusTutor.token, 'plus');
+    assert.equal(purchasePlus.status, 200);
+    const plusSession = checkouts.get(users.get(plusTutor.id).stripeCheckout.sessionId);
+    assert.equal(openPro.status, 'expired');
+    assert.equal(plusSession.amount_total, 1000);
+    assert.equal(requests.at(-1).form.get('cancel_url'), origin + '/payment/cancel?plan=plus');
+    assert.deepEqual(await purchasePlus.json(), { url: plusSession.url });
+    assert.deepEqual(await (await checkout(plusTutor.token, 'plus')).json(), { url: plusSession.url });
+    assert.equal(await plan(plusTutor.token), 'free');
+    Object.assign(plusSession, { status: 'complete', payment_status: 'paid', payment_intent: 'pi_plus' });
+    plusSession.metadata.plan = 'pro';
+    assert.equal((await event('checkout.session.completed', plusSession.id)).status, 200);
+    assert.equal(await plan(plusTutor.token), 'free');
+    plusSession.metadata.plan = 'plus';
+    assert.equal((await checkout(plusTutor.token, 'pro')).status, 409);
+    assert.equal((await event('checkout.session.completed', plusSession.id)).status, 200);
+    assert.equal(await plan(plusTutor.token), 'plus');
+    assert.deepEqual(await (await status(plusSession.id, plusTutor.token)).json(), { status: 'active', plan: 'plus' });
+    assert.equal((await checkout(plusTutor.token, 'plus')).status, 409);
+    assert.equal((await checkout(plusTutor.token, 'pro')).status, 200);
+    const upgrade = checkouts.get(users.get(plusTutor.id).stripeCheckout.sessionId);
+    Object.assign(upgrade, { status: 'complete', payment_status: 'paid', payment_intent: 'pi_plus_upgrade' });
+    assert.equal((await event('checkout.session.completed', upgrade.id)).status, 200);
+    assert.equal((await event('checkout.session.completed', plusSession.id)).status, 200);
+    assert.equal(await plan(plusTutor.token), 'pro');
+    assert.equal(await statusValue(plusSession.id, plusTutor.token), 'active');
+    const plusHistory = await (await call('/api/payments/history', { token: plusTutor.token })).json();
+    assert.deepEqual(plusHistory.items.filter(item => item.status === 'paid').map(item => item.planName), ['Plus', 'Pro']);
 });

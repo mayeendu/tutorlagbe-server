@@ -7,7 +7,8 @@ import { applicationRoutes, listTuitionReviews, type Application } from './appli
 import type { TutorAuth } from './auth.ts';
 import { catalogRoutes, type CatalogChange } from './catalog.ts';
 import { databaseErrorDetails } from './database-error.ts';
-import { mockPaymentRoutes, mockPaymentsEnabled } from './mock-payments.ts';
+import { mockPaymentRoutes, mockPaymentsEnabled, type MockPaymentStore } from './mock-payments.ts';
+import { paidPlanSchema } from './one-time-checkout.ts';
 import type { PaymentStore } from './payment-store.ts';
 import { paymentReadRoutes, paymentRoutes, type BillingOptions } from './payments.ts';
 import { getTeacher, listTeachers, profileRoutes } from './profiles.ts';
@@ -25,12 +26,13 @@ interface ApiOptions {
     catalog?: Collection<CatalogChange>;
     billing?: BillingOptions;
     paymentStore?: Pick<PaymentStore, 'history' | 'latest' | 'user'>;
-    mockPayments?: Pick<PaymentStore, 'mockCheckout'>;
+    mockPayments?: MockPaymentStore;
     imageUploadKey?: string;
 }
 
 export function createApi({ allowedOrigins, checkDatabase, checkAuthDatabase, auth, tuitions, savedTuitionAccounts, applications, catalog, billing, paymentStore = billing?.store, mockPayments, imageUploadKey }: ApiOptions) {
     const app = express();
+    const demoPayments = !billing && mockPaymentsEnabled() ? mockPayments : undefined;
     app.disable('x-powered-by');
 
     app.use((request, response, next) => {
@@ -119,7 +121,7 @@ export function createApi({ allowedOrigins, checkDatabase, checkAuthDatabase, au
 
     if (applications && tuitions) app.get('/api/tuitions/:id/reviews', listTuitionReviews(applications, tuitions));
     if (tuitions) {
-        app.use('/api/tuitions', tuitionRoutes(tuitions, auth, savedTuitionAccounts));
+        app.use('/api/tuitions', tuitionRoutes(tuitions, auth, savedTuitionAccounts, demoPayments?.mockEntitlement));
     } else {
         console.warn('Tuition catalog unavailable. Configure MONGODB_URI or BETTER_AUTH_DB_URI on the API service.');
         app.use('/api/tuitions', (_request, response) => {
@@ -142,20 +144,22 @@ export function createApi({ allowedOrigins, checkDatabase, checkAuthDatabase, au
         response.status(503).json({ error: 'Applications are temporarily unavailable.' });
     });
 
-    const mockCheckout = mockPaymentsEnabled();
     app.get('/api/payments/config', (_request, response) => {
-        response.set('Cache-Control', 'no-store').json({ stripeTestCheckout: Boolean(auth && billing),
-            mockCheckout: Boolean(mockCheckout && auth && mockPayments) });
+        const stripeTestCheckout = Boolean(auth && billing);
+        response.set('Cache-Control', 'no-store').json({ stripeTestCheckout,
+            stripeCheckoutPlans: stripeTestCheckout ? paidPlanSchema.options : [],
+            mockCheckout: Boolean(auth && demoPayments) });
     });
-    if (mockCheckout && auth && mockPayments) app.use('/api/payments/mock-checkout', mockPaymentRoutes(auth, mockPayments));
-    else app.post('/api/payments/mock-checkout', (_request, response) => {
+    if (auth && demoPayments) app.use('/api/payments/mock-checkout', mockPaymentRoutes(auth, demoPayments));
+    else app.use('/api/payments/mock-checkout', (_request, response) => {
         response.set('Cache-Control', 'no-store').status(404).json({ error: 'Route not found' });
     });
     app.use('/api/payments', (_request, response, next) => {
         response.set('Cache-Control', 'no-store');
         next();
     });
-    if (auth && paymentStore) app.use('/api/payments', paymentReadRoutes(auth, paymentStore, Boolean(billing)));
+    if (auth && paymentStore) app.use('/api/payments',
+        paymentReadRoutes(auth, paymentStore, Boolean(billing), demoPayments?.mockEntitlement));
     else app.get(['/api/payments/history', '/api/payments/transactions'], (_request, response) => {
         response.status(503).json({ code: 'PAYMENT_RECORDS_UNAVAILABLE', error: 'Payment records are temporarily unavailable.' });
     });

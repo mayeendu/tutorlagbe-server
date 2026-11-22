@@ -53,6 +53,7 @@ export function stripeGateway(secret: string) {
     return {
         createCheckout: (form: URLSearchParams, key: string) => request('checkout/sessions', checkoutSchema, form, key),
         checkout: (id: string) => request(`checkout/sessions/${encodeURIComponent(id)}`, checkoutSchema),
+        expireCheckout: (id: string) => request(`checkout/sessions/${encodeURIComponent(id)}/expire`, checkoutSchema, new URLSearchParams()),
         invoice: (id: string) => request(`invoices/${encodeURIComponent(id)}`, invoiceSchema),
         subscription: (id: string) => request(`subscriptions/${encodeURIComponent(id)}`, subscriptionSchema),
         portal: (customer: string, returnUrl: string) => request('billing_portal/sessions', z.object({ url: z.url() }), new URLSearchParams({ customer, return_url: returnUrl })),

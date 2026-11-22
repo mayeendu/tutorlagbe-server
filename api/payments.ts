@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { verifyAdmin, verifyToken, type AuthIdentity } from './access.ts';
 import type { TutorAuth } from './auth.ts';
 import { databaseErrorDetails } from './database-error.ts';
-import { handleCheckoutEvent, oneTimeCheckoutForm, pendingCheckout, proPrice } from './one-time-checkout.ts';
+import { handleCheckoutEvent, oneTimeCheckoutForm, paidPlanSchema, pendingCheckout, proPrice } from './one-time-checkout.ts';
 import type { PaymentStore } from './payment-store.ts';
 import { stripeEventSchema, validStripeSignature, type StripeGateway } from './stripe.ts';
 
@@ -13,6 +13,7 @@ const metadata = z.object({ integration: z.literal('tutorlagbe-pro'), userId: z.
 const ended = new Set(['canceled', 'incomplete_expired']);
 const revoked = new Set([...ended, 'unpaid', 'paused']);
 const access = new Set(['active', 'past_due']);
+const checkoutRequest = z.strictObject({ plan: paidPlanSchema.default('pro') });
 
 export type BillingOptions = { origin: string; webhookSecret: string; stripe: StripeGateway; store: PaymentStore };
 
@@ -92,52 +93,60 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
     });
 
     router.post(['/create-checkout-session', '/checkout'], authenticate, express.json({ limit: '8kb' }), async (request, response) => {
-        if (!z.object({ plan: z.literal('pro').optional() }).safeParse(request.body ?? {}).success) {
-            response.status(400).json({ code: 'UNSUPPORTED_CHECKOUT_PLAN', error: 'Stripe checkout is available for Pro only.' });
-            return;
-        }
         const identity: AuthIdentity = response.locals.identity;
         if (identity.role === 'admin') {
-            response.status(403).json({ error: 'Pro is available to students and teachers.' });
+            response.status(403).json({ error: 'Paid plans are available to students and tutors.' });
             return;
         }
+        const purchase = checkoutRequest.safeParse(request.body ?? {});
+        if (!purchase.success) {
+            response.status(400).json({ code: 'UNSUPPORTED_CHECKOUT_PLAN', error: 'Select Plus or Pro. Send only the plan.' });
+            return;
+        }
+        const { plan } = purchase.data;
         const user = await store.user(identity.id);
-        if (!user || user.plan === 'pro') {
-            response.status(409).json({ error: 'Your account is already on Pro or is unavailable.' });
+        if (!user || user.plan === 'pro' || user.plan === plan) {
+            response.status(409).json({ error: 'Your account already has this plan or a higher plan, or is unavailable.' });
             return;
         }
 
         let attempt = user.stripeCheckout;
         if (attempt?.sessionId) {
-            const prior = await stripe.checkout(attempt.sessionId);
+            let prior = await stripe.checkout(attempt.sessionId);
             if (prior.status === 'open' && attempt.kind === 'one-time' && attempt.role === identity.role) {
                 pendingCheckout(prior, identity.id, user.name, attempt);
-                response.json({ url: stripeUrl(prior.url, 'checkout.stripe.com') });
-                return;
+                if ((attempt.plan ?? 'pro') === plan) {
+                    response.json({ url: stripeUrl(prior.url, 'checkout.stripe.com') });
+                    return;
+                }
+                prior = await stripe.expireCheckout(prior.id);
             }
-            const failed = prior.status === 'complete' && prior.payment_status === 'unpaid' && attempt.kind === 'one-time' &&
-                (await store.checkoutPayment(prior.id, identity.id))?.status === 'failed';
+            const payment = prior.status === 'complete' && attempt.kind === 'one-time'
+                ? await store.checkoutPayment(prior.id, identity.id) : null;
+            const failed = prior.payment_status === 'unpaid' && payment?.status === 'failed';
+            const plusUpgrade = plan === 'pro' && user.plan === 'plus' && user.plusPaymentSessionId === prior.id &&
+                payment?.planName === 'Plus' && payment.status === 'paid';
             const legacyEnded = prior.status === 'complete' && prior.subscription &&
                 ended.has((await stripe.subscription(prior.subscription)).status);
-            if (prior.status !== 'expired' && !failed && !legacyEnded) {
+            if (prior.status !== 'expired' && !failed && !legacyEnded && !plusUpgrade) {
                 response.status(409).json({ error: 'There is already a checkout or subscription for this account.' });
                 return;
             }
         }
         if (!attempt || attempt.sessionId) {
-            const next = { key: randomUUID(), email: identity.email, role: identity.role, kind: 'one-time' as const };
+            const next = { key: randomUUID(), email: identity.email, role: identity.role, kind: 'one-time' as const, plan };
             if (!await store.reserve(identity.id, attempt?.key, next)) {
                 response.status(409).json({ error: 'Checkout is already being prepared. Try again shortly.' });
                 return;
             }
             attempt = next;
         }
-        if (attempt.role !== identity.role || attempt.kind !== 'one-time') {
+        if (attempt.role !== identity.role || attempt.kind !== 'one-time' || (attempt.plan ?? 'pro') !== plan) {
             response.status(409).json({ error: 'A previous checkout needs to be resolved before you can continue.' });
             return;
         }
 
-        const checkout = await stripe.createCheckout(oneTimeCheckoutForm(origin, identity.id, attempt), `tutorlagbe-pro-once-${attempt.key}`);
+        const checkout = await stripe.createCheckout(oneTimeCheckoutForm(origin, identity.id, attempt), `tutorlagbe-${plan}-once-${attempt.key}`);
         const url = stripeUrl(checkout.url, 'checkout.stripe.com');
         await store.savePending(pendingCheckout(checkout, identity.id, user.name, attempt));
         await store.saveSession(identity.id, attempt.key, checkout.id);
@@ -154,9 +163,11 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         const user = await store.user(identity.id);
         const payment = await store.checkoutPayment(id, identity.id);
         if (payment) {
+            const active = payment.planName === 'Plus'
+                ? user?.plusPaymentSessionId === id && (user.plan === 'plus' || user.plan === 'pro')
+                : user?.plan === 'pro' && user.proPaymentSessionId === id;
             response.json({ status: payment.status === 'paid'
-                ? user?.plan === 'pro' && user.proPaymentSessionId === id ? 'active' : 'pending'
-                : payment.status });
+                ? active ? 'active' : 'pending' : payment.status, plan: payment.planName === 'Plus' ? 'plus' : 'pro' });
             return;
         }
         if (user?.stripeCheckout?.sessionId !== id) {
@@ -189,14 +200,18 @@ export function paymentRoutes(auth: TutorAuth, { origin, webhookSecret, stripe, 
         if ([400, 413, 415].includes(error.status)) response.status(error.status).json({ error: 'Invalid Stripe request.' });
         else {
             console.warn('Stripe billing request failed.', { route: request.route?.path, ...databaseErrorDetails(error) });
-            response.status(503).json({ error: 'Billing is temporarily unavailable.' });
+            const creatingCheckout = Array.isArray(request.route?.path) && request.route.path.includes('/create-checkout-session');
+            response.status(503).json(creatingCheckout
+                ? { code: 'CHECKOUT_UNAVAILABLE', error: 'Could not open Stripe Test Checkout. Try again shortly.' }
+                : { error: 'Billing is temporarily unavailable.' });
         }
     };
     router.use(onError);
     return router;
 }
 
-export function paymentReadRoutes(auth: TutorAuth, store: Pick<PaymentStore, 'history' | 'latest' | 'user'>, gatewayReady: boolean) {
+export function paymentReadRoutes(auth: TutorAuth, store: Pick<PaymentStore, 'history' | 'latest' | 'user'>, gatewayReady: boolean,
+    demoEntitlement?: PaymentStore['mockEntitlement']) {
     const router = express.Router();
     const authenticate = verifyToken(auth);
     router.get('/history', authenticate, async (request, response) => {
@@ -205,12 +220,14 @@ export function paymentReadRoutes(auth: TutorAuth, store: Pick<PaymentStore, 'hi
             response.status(400).json({ error: 'Invalid payment page.' });
             return;
         }
-        const id: string = response.locals.identity.id;
-        const [rows, user] = await Promise.all([
-            store.history(id, (page.data - 1) * 24, 25), gatewayReady ? store.user(id) : undefined,
+        const { id, role }: AuthIdentity = response.locals.identity;
+        const [rows, user, demoSubscription] = await Promise.all([
+            store.history(id, (page.data - 1) * 24, 25, Boolean(demoEntitlement)), gatewayReady ? store.user(id) : undefined,
+            role !== 'admin' ? demoEntitlement?.(id, role) : undefined,
         ]);
         response.json({ items: rows.slice(0, 24), hasMore: rows.length > 24 && page.data < 1000,
-            canManageSubscription: Boolean(user?.stripeSubscriptionId) });
+            canManageSubscription: Boolean(user?.stripeSubscriptionId),
+            ...(demoEntitlement && role !== 'admin' ? { demoSubscription: demoSubscription ?? { plan: 'free', expiresAt: null } } : {}) });
     });
 
     router.get('/transactions', authenticate, verifyAdmin, async (request, response) => {

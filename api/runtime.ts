@@ -13,8 +13,6 @@ import type { BillingOptions } from './payments.ts';
 import { stripeGateway } from './stripe.ts';
 import type { SavedTuitionAccount, Tuition } from './tuitions.ts';
 
-const productionFrontendOrigin = 'https://tutor-lagbe-kappa.vercel.app';
-
 function exactOrigins(value: string, setting: string) {
     return new Set(value.split(',').map((entry) => entry.trim()).filter(Boolean).map((origin) => {
         const url = URL.parse(origin);
@@ -27,6 +25,7 @@ function exactOrigins(value: string, setting: string) {
 
 export function createRuntime() {
     if (process.env.npm_lifecycle_event === 'dev') process.env.NODE_ENV ??= 'development';
+    const explicitAuthOrigin = process.env.BETTER_AUTH_URL?.trim();
     config({ path: fileURLToPath(new URL('../.env', import.meta.url)), quiet: true });
 
     if (process.env.NODE_ENV === 'development' && !process.env.BETTER_AUTH_DB_URI?.trim() && !process.env.MONGODB_URI?.trim()) {
@@ -37,7 +36,9 @@ export function createRuntime() {
             processEnv: clientSettings,
             quiet: true,
         });
-        for (const key of ['BETTER_AUTH_DB_URI', 'BETTER_AUTH_SECRET', 'BETTER_AUTH_URL',
+        const clientAuthOrigin = clientSettings.BETTER_AUTH_URL?.trim();
+        if (!explicitAuthOrigin && clientAuthOrigin) process.env.BETTER_AUTH_URL = clientAuthOrigin;
+        for (const key of ['BETTER_AUTH_DB_URI', 'BETTER_AUTH_SECRET',
             'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'TUTORLAGBE_USER_COLLECTION']) {
             if (!process.env[key]?.trim() && clientSettings[key]?.trim()) process.env[key] = clientSettings[key];
         }
@@ -49,10 +50,6 @@ export function createRuntime() {
         : 'http://localhost:3000,http://127.0.0.1:3000';
     const allowedOrigins = exactOrigins(process.env.CORS_ALLOWED_ORIGINS ?? defaultOrigins, 'CORS_ALLOWED_ORIGINS');
     const trustedOrigins = exactOrigins(process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? '', 'BETTER_AUTH_TRUSTED_ORIGINS');
-    if (isProduction && (!process.env.VERCEL_ENV || process.env.VERCEL_ENV === 'production')) {
-        trustedOrigins.add(productionFrontendOrigin);
-        allowedOrigins.add(productionFrontendOrigin);
-    }
 
     const clients = new Map<string, MongoClient>();
     function getClient(uri: string, setting: string) {
@@ -84,12 +81,12 @@ export function createRuntime() {
     let authOrigin: string | undefined;
     if (secret || authUri || process.env.BETTER_AUTH_URL) {
         const url = URL.parse(process.env.BETTER_AUTH_URL?.trim() ?? '');
-        const validUrl = url && (url.protocol === 'https:' || (!isProduction && url.protocol === 'http:')) &&
+        const validUrl = url && ['http:', 'https:'].includes(url.protocol) &&
             !url.hostname.includes('*') &&
             url.pathname === '/' && !url.search && !url.hash && !url.username && !url.password;
         const databaseUri = authUri || mongoUri;
         if (!secret || secret.trim().length < 32 || !databaseUri || !validUrl) {
-            throw new Error('Configure BETTER_AUTH_SECRET (at least 32 characters), BETTER_AUTH_URL (the exact public frontend origin, HTTPS in production), and BETTER_AUTH_DB_URI or MONGODB_URI.');
+            throw new Error('Configure BETTER_AUTH_SECRET (at least 32 characters), BETTER_AUTH_URL (the exact public origin), and BETTER_AUTH_DB_URI or MONGODB_URI.');
         }
 
         const client = getClient(databaseUri, authUri ? 'BETTER_AUTH_DB_URI' : 'MONGODB_URI');
@@ -126,7 +123,11 @@ export function createRuntime() {
     const testKeyValid = /^(sk|rk|rkcs)_test_\w+$/.test(stripeSecret ?? '');
     const webhookSecretValid = /^whsec_\w+$/.test(webhookSecret ?? '');
     if (auth && authOrigin && store && stripeSecret && webhookSecret && testKeyValid && webhookSecretValid) {
-        billing = { origin: authOrigin, webhookSecret, stripe: stripeGateway(stripeSecret), store };
+        try {
+            billing = { origin: authOrigin, webhookSecret, stripe: stripeGateway(stripeSecret), store };
+        } catch {
+            console.warn('Stripe initialization failed. Checkout is unavailable.');
+        }
     }
     if (isProduction || stripeSecret || webhookSecret) {
         const log = billing ? console.info : console.warn;
